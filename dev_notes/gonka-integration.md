@@ -1,275 +1,249 @@
-# Gonka 接入实现笔记
+# Gonka 接入 + 吞吐优化笔记
 
-> 分支：`gonka-tradeagents-kimi/v1`
-> 范围：把 TradingAgents 多 agent 框架接到 Gonka 去中心化 LLM 平台，
-> 每日跑 S&P 500 入库 + Streamlit 展示。
-
----
-
-## 一、Gonka 提供的两条路径
-
-Gonka 同时暴露**两套接入方式**，凭据、协议、运维特性都不一样：
-
-### 1. 官方 SDK（去中心化路径）
-
-仓库：`gonka-ai/gonka-openai`，PyPI：`gonka-openai`。
-
-- 客户端用 ECDSA secp256k1 私钥**对每个请求体签名**，签名+地址放
-  `Authorization` / `X-Requester-Address` / `X-Timestamp` 三个 header。
-- 上游 endpoint 不是写死的，而是从一个 `source_url`（Gonka 网络节点）
-  动态发现（`resolve_and_select_endpoint(source_url=...)`）。
-- 直连节点，不经过 Cloudflare。
-- 需要的依赖含 C 扩展 `secp256k1`，conda 环境下有预编译 wheel；
-  纯 pip 在 Debian/Ubuntu 上得先 `apt install libsecp256k1-dev`。
-
-### 2. Router（centralised path）
-
-`https://api.gonkascan.com/v1`，由 `router.gonkascan.com` 这个
-dashboard 签发的 `sk-...` bearer token 认证。
-
-- 接口完全是 OpenAI-compatible chat completions：直接拿 `openai` Python
-  SDK 或者 `langchain_openai.ChatOpenAI` 指向这个 base_url 就能用。
-- 后面是 Cloudflare → Gonka 路由层 → 网络节点。Cloudflare 帮你把
-  ECDSA 签名做了，所以客户端只要带 bearer token。
-- **重要约束**：Cloudflare 默认 100s 上游响应超时（HTTP 524）。
-  推理慢的模型 + 长 prompt 会被切。
-
-> 这两条路径**不是同一个 SDK 的两种调用方式**——它们是两个完全不同
-> 的传输层。Router 不需要任何 Gonka SDK，理论上你拿 `curl` 也能用。
-> SDK 只用在去中心化路径上。
+> 分支:`gonka-tradeagents-kimi/v1`
+> 范围:TradingAgents 多 agent 框架接入 Gonka,每天分析 S&P 500 入库 + Streamlit 展示。
+> 这份文档合并了原 `gonka-integration.md`(实现细节)与 `gonka-throughput-analysis.md`(吞吐分析 + 实测)。
 
 ---
 
-## 二、本仓库的实现：`GonkaClient` 双模式自动调度
+## 一、Gonka 提供的两条接入路径
 
-接入文件：[`tradingagents/llm_clients/gonka_client.py`](../tradingagents/llm_clients/gonka_client.py)
+| 维度       | SDK 路径(去中心化)                                | Router 路径(中心化代理)                      |
+| ---------- | ------------------------------------------------- | -------------------------------------------- |
+| 上游入口   | Gonka 网络节点(由 source URL 动态发现)           | `https://api.gonkascan.com/v1`               |
+| 认证       | secp256k1 私钥逐请求 ECDSA 签名                   | `router.gonkascan.com` 发的 `sk-...` bearer  |
+| 网关       | 直连节点                                          | 经 Cloudflare(100s 上游响应超时硬限)        |
+| 依赖       | `gonka-openai` + `secp256k1` C 扩展               | 纯 `langchain-openai`,无 Gonka 专用 SDK     |
+| 凭据       | `GONKA_PRIVATE_KEY` + `GONKA_SOURCE_URL`          | `GONKA_API_KEY`                              |
+| 适用       | 主网账户、需要绕过 CF、需要多 TA fan-out          | 快速上手、Demo、原型                         |
 
-`GonkaClient.get_llm()` 根据环境变量自动选路：
-
-| 环境变量组合                                       | 走的路径   |
-| -------------------------------------------------- | ---------- |
-| `GONKA_PRIVATE_KEY` + `GONKA_SOURCE_URL` 都设了    | SDK 路径   |
-| 只设了 `GONKA_API_KEY`                             | Router 路径 |
-| SDK 两个变量只设了一个                             | 明确报错（提示缺哪个） |
-| 一个都没设                                         | 报错列出所有可选组合 |
-
-两条路径最终都返回 `NormalizedChatOpenAI` 实例（与其他 OpenAI-兼容
-provider 共用同一个壳），所以 LangGraph / 结构化输出 / tool-calling /
-capability 调度等下游代码**零改动**。
-
-- **SDK 模式构造**：调 `resolve_and_select_endpoint(source_url=...)`
-  拿到 `(url, address)`，用 `gonka_http_client(private_key, transfer_address)`
-  生成签名 http client，把这个 client 通过 `http_client=` 注入
-  `ChatOpenAI`。
-- **Router 模式构造**：`ChatOpenAI(base_url="https://api.gonkascan.com/v1",
-  api_key=<bearer>)`。这条路径**没用任何 Gonka 自己的 SDK**——
-  完全是标准的 langchain-openai 调用，只是 base_url 指向了 Gonka 的
-  router。
-
-> 用户初次提问的 "router 手写的 SDK" 这个说法不太准确——router
-> 路径既没有手搓 HTTP，也不依赖 `gonka-openai`，就是个普通的
-> OpenAI-compatible HTTP 客户端。整个仓库里**唯一真正用到 gonka-openai
-> SDK 的地方**就是 `GonkaClient._build_sdk_llm()` 那十几行。
-
-### 注册过的地方
-
-- `tradingagents/llm_clients/factory.py`：`provider == "gonka"` 单独
-  dispatch 到 `GonkaClient`（不和 `_OPENAI_COMPATIBLE` 那批共用，
-  因为 SDK 路径要注入 `http_client`，base_url 也是动态的）。
-- `tradingagents/llm_clients/api_key_env.py`：`"gonka": None`（gonka 不
-  通过 "给一个 API key 环境变量" 的模型来认证；私钥/token 都是
-  `GonkaClient` 自己读环境）。
-- `tradingagents/llm_clients/model_catalog.py`：加了 `_GONKA_MODELS`
-  字典，列出 `moonshotai/Kimi-K2.6` 和
-  `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8` 两个 ID（取自
-  `GET /v1/models` 的返回）。
-- `cli/utils.py`：交互式 provider 下拉里加了 "Gonka"，`base_url`
-  传 `None` 让 `GonkaClient` 自己决定。
+两条路径**不是同一个 SDK 的两种调用方式**——Router 路径不依赖任何 Gonka 自家代码,本质就是个 OpenAI-兼容 HTTP 客户端。仓库里**唯一真正用到 `gonka-openai` SDK 的地方**是 `GonkaClient._build_sdk_llm()` 那十几行。
 
 ---
 
-## 三、第一次 E2E 测试：Kimi vs Qwen3 调用耗时
+## 二、本仓库实现:`GonkaClient` 双模式自动调度
 
-测试条件：1 个 analyst（market）、`max_debate_rounds=0`、
-`max_risk_discuss_rounds=0`、`news_article_limit=3`，NVDA / 2026-05-13，
-走 router 路径（bearer token）。日志取自实际运行。
+主文件:[`tradingagents/llm_clients/gonka_client.py`](../tradingagents/llm_clients/gonka_client.py)
 
-### Kimi-K2.6（推理模型）—— 失败
+### 2.1 选路规则
 
-| # | 时间戳        | 间隔   | 状态                  |
-| - | ------------- | ------ | --------------------- |
-| 1 | 17:12:13      | -      | 200 OK                |
-| 2 | 17:12:45      | +32s   | 200 OK                |
-| 3 | 17:14:51      | +2m6s  | **524**（CF 超时）    |
-| 4 | 17:16:57      | +2m6s  | **524**（自动重试也超）|
+| 环境变量                                            | 走的路径   |
+| --------------------------------------------------- | ---------- |
+| `GONKA_PRIVATE_KEY` + `GONKA_SOURCE_URL` 都设了     | SDK        |
+| 只设 `GONKA_API_KEY`                                | Router     |
+| SDK 两个变量只设了一个                              | 明确报错指出缺哪个 |
+| 一个都没设                                          | 报错列出所有可选组合 |
 
-第 3 次调用开始 prompt 里塞进了 analyst 的工具调用结果，Kimi 推理时间
-超 100s 被 Cloudflare 切。重试同样 prompt 同样超。**Kimi-K2.6 走 router
-路径在 TradingAgents 这种长上下文场景下基本跑不通**——这是 Cloudflare
-网关超时 vs 推理模型固有延迟的结构冲突，跟 prompt 怎么压缩关系不大
-（试过最小配置照样超）。
+两条路径都返回 `GonkaStreamSafeChatOpenAI` 实例(继承自 `NormalizedChatOpenAI`),下游 LangGraph / 结构化输出 / tool-calling / capability 调度等代码零改动。
 
-### Qwen3-235B-Instruct（非推理 instruct）—— 成功
+### 2.2 构造
 
-| #  | 时间戳    | 间隔   | 状态              |
-| -- | --------- | ------ | ----------------- |
-| 1  | 17:22:36  | -      | 200 OK            |
-| 2  | 17:22:54  | +18s   | 200 OK            |
-| 3  | 17:23:03  | +9s    | 200 OK            |
-| 4  | 17:23:10  | +7s    | 200 OK            |
-| 5  | 17:23:58  | +47s   | 200 OK            |
-| 6  | 17:24:44  | +47s   | 200 OK            |
-| 7  | 17:26:50  | +2m5s  | **524**（CF 超时）|
-| 7' | 17:26:59  | +8s    | 200 OK（重试恢复）|
-| 8  | 17:27:03  | +4s    | 200 OK            |
-| 9  | 17:27:23  | +20s   | 200 OK            |
-| 10 | 17:27:30  | +7s    | 200 OK            |
+- **SDK**:`resolve_and_select_endpoint(source_url=...)` → `(url, address)` → `gonka_http_client(private_key, transfer_address)` → `ChatOpenAI(base_url=url, http_client=<signed>)`。
+- **Router**:`ChatOpenAI(base_url="https://api.gonkascan.com/v1", api_key=<bearer>)`,普通 langchain-openai 调用,无任何 Gonka SDK。
 
-整条 pipeline 从首次 HTTP 到最后入库总耗时 **4 分 54 秒**（17:22:36 →
-17:27:30），单次调用中位数 ~9-20 秒，两次落在 ~47 秒的较长一段（大概
-率是 market analyst 整合工具结果 + research manager 判定）。中间一次
-524 被 openai SDK 的内置重试 8 秒内救回来了。
+### 2.3 默认开 streaming
 
-最终入库：
+两条路径 build 时都默认 `streaming=True, stream_usage=True`。原因见第三节。调用方传 `streaming=False` 可关。
+
+### 2.4 vLLM 空内容 fix
+
+`GonkaStreamSafeChatOpenAI._get_request_payload` 出栈前检查 `role=assistant + tool_calls + content.strip() == ""` 的消息,把 content 改成 `None`(JSON `null`)。Streaming chunk aggregator 偶发把 `\n\n\n` 攒进这种 message 的 content,OpenAI 容忍但 vLLM 严格拒绝。
+
+### 2.5 注册点
+
+- `llm_clients/factory.py`:`provider == "gonka"` 单独 dispatch 到 `GonkaClient`(SDK 路径需要注入 `http_client` 且 base_url 动态)。
+- `llm_clients/api_key_env.py`:`"gonka": None`(认证方式不是单一 API key env var)。
+- `llm_clients/model_catalog.py`:`_GONKA_MODELS` 列出 `moonshotai/Kimi-K2.6` 和 `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`。
+- `cli/utils.py`:交互式 provider 下拉里加 "Gonka",base_url 留 None 让客户端自己决定。
+
+---
+
+## 三、Gonka 架构(源码层面)
+
+读 [`gonka/decentralized-api/internal/server/public/`](https://github.com/gonka-ai/gonka/tree/main/decentralized-api/internal/server/public)。
+
+### 3.1 请求路径
 
 ```
-rating         = Buy
-final_decision = 1294 字符（PM 结构化输出）
-market_report  = 5783 字符
-trader_plan    = 528 字符
-investment_plan= 1345 字符
+client → TA(Transfer Agent) → Executor(另一个 mlnode) → vLLM
+       POST /v1/chat/completions    forward /v1/chat/completions
 ```
 
-### 结论
+TA 做:签名校验 → 估 prompt token → `bandwidthLimiter.CanAcceptRequest()` → 选 Executor → 转发请求 → `proxyResponse` 转回响应。**每个 TA 有独立的 `bandwidthLimiter`,超限直接返回 429**,错误信息直接提示"换一个 TA":
 
-- **Router 路径 + Kimi-K2.6**：实测跑不通。哪怕最简配置也会超
-  Cloudflare 100s。仅适合 short prompt 的单轮调用。
-- **Router 路径 + Qwen3-235B-Instruct**：能跑通，但偶尔会有单次 524，
-  靠 openai SDK 自动重试兜底。`app/runner.py` 因此默认用 Qwen3。
-- **SDK 路径**：理论上绕过 Cloudflare，Kimi 应该可用。**未实测**
-  （手上没有 secp256k1 私钥 + Gonka 节点 source URL）。
+> `Transfer Agent capacity reached. Try another TA from <url>/v1/epochs/current/participants`
+> —— `post_chat_handler.go:333`
+
+**这暗示了多 TA fan-out 才是横向扩展的正解**。
+
+### 3.2 流式 vs 非流式
+
+`proxy.go`:
+
+```go
+if strings.HasPrefix(contentType, "text/event-stream") {
+    proxyTextStreamResponse(...)   // bufio.Scanner + Fprintln,逐行刷
+} else {
+    proxyJsonResponse(...)         // io.ReadAll 全读完再 Write
+}
+```
+
+**非流式响应 TA 全缓冲**:TCP 连接 100s 沉默 → Cloudflare 524。
+**流式响应端到端透传**:第一 token 1-3 秒就到客户端,CF 全程不超时。
+
+**这是单点最大的优化**:开 stream=true,CF 524 立刻消失,不依赖任何 Gonka 配置变更。
+
+### 3.3 参与者发现
+
+```
+GET /v1/participants                   → 所有 participants(InferenceUrl + VotingPower)
+GET /v1/epochs/current/participants    → 当前 epoch 的活跃 participants(带 Merkle proof)
+```
+
+`gonka-openai` 的 `resolve_endpoints(source_url=...)` 打第二个,默认 `random.choice` 随机挑一个 TA 钉到客户端整个生命周期。要 fan-out 得**多构造几个客户端**,每个钉到不同 TA(或自定义 `endpoint_selection_strategy=`)。
+
+### 3.4 跨仓事实
+
+`gonka/dev_notes/sp500-tradingagents-gonka-plan.md`:
+
+> Gonka 主网当前对外推理模型是 `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`,**Kimi K2.6 还没上线**。
+
+→ Router 上"能选 Kimi"实际是路由到 Gonka 网络**外**的 Moonshot 后端(也解释了为什么 Kimi-on-router 比 Qwen 慢一个量级,且 SDK 路径救不了它)。**真正用 Gonka 算力的 = Qwen3-235B**。
 
 ---
 
-## 四、跑通需要的配置
+## 四、吞吐优化与实测
 
-### 4.1 环境
+### 4.1 已落地
 
-#### 推荐：conda
+| 改动                  | 实现                                                       | 需要私钥? |
+| --------------------- | ---------------------------------------------------------- | --------- |
+| Streaming             | `GonkaStreamSafeChatOpenAI` 默认 `streaming=True`          | 否        |
+| Ticker 间并发         | `app/runner.py` `ThreadPoolExecutor` + `-j N` CLI          | 否        |
+| vLLM 空内容兼容       | `_get_request_payload` 出栈前改 `content=None`              | 否        |
+
+### 4.2 实测(router + Qwen3-235B)
+
+**Run A** —— 单 ticker minimal config(NVDA / 1-analyst / 0-debate),只看 streaming 效果:
+
+| 配置             | 调用数  | 524 | 重试 | 端到端  |
+| ---------------- | ------- | --- | ---- | ------- |
+| 非流式(基线)    | 9 + 1   | 1   | 1    | 4m54s   |
+| **流式**         | 7       | 0   | 0    | **2m53s** |
+
+→ 降 41%,524 归零。流式让 CF 始终看到字节在流,完全不触发"上游 100s 没响应"。
+
+**Run B** —— 4 ticker 并行 + 完整默认配置(4 analyst + 1 轮辩论 + 1 轮风控):
+
+```
+$ python -m app.runner -j 4 NVDA AAPL MSFT GOOGL
+```
+
+| ticker | rating       | per-ticker | 报告字符数(final/market/sent/news/fund/invp/trader) |
+| ------ | ------------ | ---------- | --------------------------------------------------- |
+| NVDA   | Buy          | ~8m59s     | 1692 / 7186 / 6340 / 6602 / 6745 / 2661 / 593       |
+| MSFT   | Buy          | ~9m28s     | 1422 / 9756 / 5727 / 5394 / 6022 / 1898 / 641       |
+| GOOGL  | Hold         | ~10m24s    | 2010 / 8168 / 7464 / 6829 / 7767 / 2204 / 582       |
+| AAPL   | Underweight  | ~13m56s    | 1697 / 7372 / 7480 / 6502 / 8659 / 2352 / 720       |
+
+总耗时 **836.7s ≈ 13m57s**,4/4 成功,0 个 524,0 次重试。总时间 ≈ 最长单 ticker 任务 → 4 worker 近线性 scale。
+
+**外推**:按 Run B 数据 + AAPL 最长 14 分钟,**20 只 S&P 500 大概 30 分钟跑完**,完全在交易日盘后批量调度窗口内。
+
+### 4.3 待做(优先级递减)
+
+| 改动                       | 预期效果                              | 需要私钥? | 备注 |
+| -------------------------- | ------------------------------------- | --------- | ---- |
+| SDK 多 TA fan-out          | K 个 TA ≈ K× 吞吐 + 绕开 Cloudflare   | **是**    | 真正"用满 Gonka",见 4.4 |
+| LangGraph analyst 并行     | 单 ticker 提速 3-4×                   | 否        | 改 `trading_graph.py` + reducer |
+| 直连 TA URL                | 减一跳延迟                            | **是**    | SDK fan-out 顺带 |
+
+### 4.4 SDK fan-out 实现草图
+
+`GonkaClient._build_sdk_llm` 当前每次 random.choice 一个固定 TA。改造:
+
+```python
+# 缓存 epoch 内的 TA 列表
+self._tas = resolve_endpoints(source_url=...)
+# 每次 build llm 取下一个 TA(round-robin)
+ta = self._tas[self._counter % len(self._tas)]; self._counter += 1
+http_client = gonka_http_client(private_key, transfer_address=ta.address)
+return GonkaStreamSafeChatOpenAI(base_url=ta.url, http_client=http_client, ...)
+```
+
+跟 ticker-并发天然契合:**4 个 worker × 4 个 graph × 各自钉到不同 TA**。每个 worker 全程稳定一个 TA,既享 round-robin 又不在单请求层切换 client。
+
+---
+
+## 五、配置和运行
+
+### 5.1 环境(推荐 conda)
 
 ```bash
-# 安装 miniconda（如已有可跳过）
-curl -fsSL -o /tmp/miniconda.sh \
-  https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh
+curl -fsSL -o /tmp/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh
 bash /tmp/miniconda.sh -b -p ~/miniconda3
 source ~/miniconda3/etc/profile.d/conda.sh
-
-# 接受 channel TOS（首次需要）
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-
-# 创建并激活环境
-conda create -n tradingagents python=3.11 -y
-conda activate tradingagents
-
-# 装项目 + app 额外依赖（含 gonka-openai、streamlit、apscheduler）
-cd <repo>
+conda create -n tradingagents python=3.11 -y && conda activate tradingagents
 pip install -e ".[app]"
 ```
 
-#### 备选：纯 pip（需要 libsecp256k1）
+纯 pip 装法:`apt install libsecp256k1-dev build-essential pkg-config` 后再 `pip install -e ".[app]"`。
+
+### 5.2 `.env`(两条路径二选一)
+
+**路径 A — Router(快上手)**:
 
 ```bash
-sudo apt-get install -y libsecp256k1-dev build-essential pkg-config
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[app]"
-```
-
-### 4.2 `.env` 配置
-
-把 `.env.example` 复制成 `.env` 后，**两条路径二选一**：
-
-#### 路径 A：Router（最快上手，推荐用 Qwen3）
-
-```bash
-# Gonka router bearer token（router.gonkascan.com dashboard 签发）
 GONKA_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# 用 router 时强烈建议用 Qwen3-Instruct，避免 Kimi 触发 CF 100s 超时
 TRADINGAGENTS_LLM_PROVIDER=gonka
 TRADINGAGENTS_DEEP_THINK_LLM=Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
 TRADINGAGENTS_QUICK_THINK_LLM=Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
 ```
 
-> `app/runner.py` 在 `TRADINGAGENTS_LLM_PROVIDER` 没设时会自动默认
-> 走这个组合，所以只要设了 `GONKA_API_KEY` 就能跑。上面三个
-> `TRADINGAGENTS_*` 是显式声明，建议留下方便 audit。
+`app/runner.py` 在 `TRADINGAGENTS_LLM_PROVIDER` 没设时默认走这个组合,所以只设 `GONKA_API_KEY` 就能跑。
 
-#### 路径 B：SDK（去中心化，可用 Kimi）
+**路径 B — SDK(去中心化)**:
 
 ```bash
-GONKA_PRIVATE_KEY=0x<64 hex chars>             # secp256k1 私钥
-GONKA_SOURCE_URL=https://<gonka-node>          # 用来发现 endpoint 的网络节点
-
+GONKA_PRIVATE_KEY=0x<64 hex>
+GONKA_SOURCE_URL=https://<gonka-node>
 TRADINGAGENTS_LLM_PROVIDER=gonka
-TRADINGAGENTS_DEEP_THINK_LLM=moonshotai/Kimi-K2.6
-TRADINGAGENTS_QUICK_THINK_LLM=moonshotai/Kimi-K2.6
-
-# 可选
-# GONKA_ENDPOINTS=https://node1:9000;gonka1addr,https://node2:9000;gonka2addr
-# GONKA_VERIFY_PROOF=1
+TRADINGAGENTS_DEEP_THINK_LLM=Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+# 可选:GONKA_ENDPOINTS / GONKA_VERIFY_PROOF
 ```
 
-> `GonkaClient` 看到 `GONKA_PRIVATE_KEY` 和 `GONKA_SOURCE_URL` 同时
-> 存在就自动切到 SDK 路径，不需要额外开关。
-
-#### 应用层可选
+**应用层可选**:
 
 ```bash
-# 自定义 SQLite 路径（默认 ~/.tradingagents/app/decisions.sqlite3）
-TRADINGAGENTS_APP_DB=/path/to/decisions.sqlite3
-
-# 覆盖默认 top-20 列表
-SP500_TICKERS=NVDA,AAPL,MSFT,GOOGL,AMZN
-
-# Scheduler 默认：周一-周五 16:30 America/New_York
+TRADINGAGENTS_APP_DB=/path/to/decisions.sqlite3     # 默认 ~/.tradingagents/app/decisions.sqlite3
+TRADINGAGENTS_APP_MAX_WORKERS=4                      # 默认 1(串行)
+SP500_TICKERS=NVDA,AAPL,MSFT                         # 覆盖默认 top-20
 TRADINGAGENTS_APP_CRON_HOUR=16
 TRADINGAGENTS_APP_CRON_MINUTE=30
-TRADINGAGENTS_APP_CRON_DOW=mon-fri
 TRADINGAGENTS_APP_TIMEZONE=America/New_York
-TRADINGAGENTS_APP_TOP_N=20
 TRADINGAGENTS_APP_RUN_ON_START=false
 ```
 
-### 4.3 跑
+### 5.3 跑
 
 ```bash
-# 单 ticker 一次性跑（5 分钟左右 / 只）
-python -m app.runner NVDA
-
-# 默认 top-20 全跑
-python -m app.runner
-
-# 起 scheduler（前台进程，Ctrl-C 退出）
-python -m app.scheduler
-
-# 起 dashboard（默认 http://localhost:8501）
-streamlit run app/dashboard.py
-
-# 跑远程 / docker 等场景，外面要能访问就开 0.0.0.0
-streamlit run app/dashboard.py \
-  --server.address 0.0.0.0 --server.port 8501 --server.headless true
+python -m app.runner NVDA                  # 单 ticker
+python -m app.runner -j 4 NVDA AAPL MSFT GOOGL  # 4 并发
+python -m app.runner                       # 默认 top-20
+python -m app.scheduler                    # 调度(前台,Ctrl-C 退)
+streamlit run app/dashboard.py             # 看板(默认 :8501)
 ```
 
 ---
 
-## 五、未完成 / 已知问题
+## 六、未完成 / 已知限制
 
-- **没在 SDK 路径下做过 E2E**——没拿到测试私钥 + source URL。
-  理论上 SDK 绕过 Cloudflare，Kimi 应该能跑，需要拿到凭据后验证一下。
-- **批量 20 只全跑**没实测。按 ~5 分钟/只估，约 1.7 小时跑完一轮，
-  调用次数约 200。Router 上偶发 524 + 8s 重试，整体应该能容忍，但
-  建议加并发上限和退避策略（现在是严格串行）。
-- **Dashboard 还没真人验收**。
-- 当前 commit 历史：分支建在 main (a5cb7cb) 上，单 commit
-  `feat(gonka): dual-mode Gonka LLM client + daily S&P 500 app`。
+- **SDK 路径没真跑过 e2e**——没拿到 Gonka 主网账户。`GonkaClient._build_sdk_llm` 代码路径写好了,等私钥就绪后第一次跑要补一份实测数据。
+- **Kimi K2.6 没在 Gonka 主网上,router 上的是套到 Moonshot 外部**——等真上 Gonka 再测,Streaming + SDK 路径理论上能让它跑通。
+- **多 TA fan-out 未实现**——见 4.4 草图。是榨干 Gonka 算力的关键改动。
+- **LangGraph 节点并行未做**——4 analyst 仍串行,涉及 reducer 重构,排在 fan-out 之后。
+- **20 只全跑 / `-j 8/16` 压测**没做。
+- **Streamlit dashboard 未做真人验收**。
+- **没有单测**:`GonkaStreamSafeChatOpenAI._get_request_payload` 这种 vLLM 兼容边界 fix 应该单测固化。
