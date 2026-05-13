@@ -35,13 +35,70 @@ from .validators import validate_model
 
 # Forwarded verbatim to ``ChatOpenAI`` so callers can tune timeouts and retries
 # the same way they do for the other OpenAI-compatible providers.
-_PASSTHROUGH_KWARGS = ("timeout", "max_retries", "callbacks")
+_PASSTHROUGH_KWARGS = ("timeout", "max_retries", "callbacks", "streaming")
+
+
+# Default kwargs that apply to both SDK and router paths. Streaming is on by
+# default because:
+#   1. The Gonka API node proxies streamed responses chunk-by-chunk
+#      (decentralized-api/internal/server/public/proxy.go: text/event-stream
+#      branch uses bufio.Scanner + Fprintln), but buffers non-streamed JSON
+#      responses entirely (io.ReadAll). For long-running inferences the
+#      non-streamed path leaves the TCP connection silent until the executor
+#      finishes — Cloudflare's 100s upstream-response timeout fires every time
+#      Kimi-K2.6 (or any sufficiently long generation) crosses that
+#      threshold. Streaming keeps bytes flowing so CF never sees the gap.
+#   2. ``stream_usage=True`` re-asks the server to include the usage block in
+#      the final stream chunk; otherwise LangChain has no way to report
+#      token counts under streaming mode.
+# Operators who really need non-streamed (e.g. for an upstream that doesn't
+# support SSE) can pass ``streaming=False`` via kwargs.
+_STREAMING_DEFAULTS = {"streaming": True, "stream_usage": True}
 
 
 # The centralised router endpoint. Hardcoded here rather than in
 # ``openai_client._PROVIDER_BASE_URL`` because the Gonka provider does not go
 # through the generic OpenAI-compatible code path — it has its own dispatch.
 _ROUTER_BASE_URL = "https://api.gonkascan.com/v1"
+
+
+class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
+    """vLLM-aware ChatOpenAI subclass for Gonka backends.
+
+    Gonka serves inference through vLLM, which is stricter than OpenAI's own
+    chat-completions API about assistant message content:
+
+    * OpenAI accepts ``content: ""`` (or whitespace-only content) on
+      assistant messages that carry ``tool_calls`` — the empty content is
+      treated as "tool call only".
+    * vLLM rejects the same payload with HTTP 400 ``messages[i].content:
+      must not be empty`` — both the empty string and an all-whitespace
+      string (e.g. ``"\\n\\n"``) trip it.
+
+    Under streaming mode the chunk aggregator inside ``langchain-openai``
+    naturally produces these shapes: when a streamed assistant turn finishes
+    with only tool calls and a few newline/space chunks in between, the
+    aggregated message lands with ``content="\\n\\n\\n"``. On the *next*
+    turn — when LangChain ships the entire history back — vLLM 400s.
+
+    The fix is purely in the outbound direction: right before the openai SDK
+    serialises the message list, we rewrite any assistant-with-tool_calls
+    message whose content stripped to empty into ``content=None`` (which the
+    SDK turns into JSON ``null`` — the form vLLM accepts). Non-assistant
+    roles and assistant messages with real content are left untouched.
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        for message in payload.get("messages", []):
+            if message.get("role") != "assistant":
+                continue
+            if not message.get("tool_calls"):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip() == "":
+                message["content"] = None
+        return payload
 
 
 class GonkaClient(BaseLLMClient):
@@ -87,6 +144,16 @@ class GonkaClient(BaseLLMClient):
 
     # ── builders ───────────────────────────────────────────────────────────
 
+    def _apply_streaming_defaults(self, llm_kwargs: dict[str, Any]) -> None:
+        """Layer streaming defaults under any user-supplied overrides.
+
+        Caller-passed kwargs win — operators who pass ``streaming=False`` get
+        the legacy buffered behavior. ``stream_usage`` only takes effect when
+        streaming is on, so we mirror that.
+        """
+        for key, value in _STREAMING_DEFAULTS.items():
+            llm_kwargs.setdefault(key, self.kwargs.get(key, value))
+
     def _build_sdk_llm(self, source_url: str, private_key: str) -> Any:
         from gonka_openai import gonka_http_client, resolve_and_select_endpoint
 
@@ -106,7 +173,8 @@ class GonkaClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
-        return NormalizedChatOpenAI(**llm_kwargs)
+        self._apply_streaming_defaults(llm_kwargs)
+        return GonkaStreamSafeChatOpenAI(**llm_kwargs)
 
     def _build_router_llm(self, api_key: str) -> Any:
         llm_kwargs: dict[str, Any] = {
@@ -117,7 +185,8 @@ class GonkaClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
-        return NormalizedChatOpenAI(**llm_kwargs)
+        self._apply_streaming_defaults(llm_kwargs)
+        return GonkaStreamSafeChatOpenAI(**llm_kwargs)
 
     # ── public API ─────────────────────────────────────────────────────────
 

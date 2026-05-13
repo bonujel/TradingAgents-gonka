@@ -7,10 +7,13 @@ rate limits, and the deterministic ordering makes the dashboard predictable.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -121,13 +124,38 @@ def run_one(
         return {"ticker": ticker, "ok": False, "error": str(exc)}
 
 
+def _env_max_workers(default: int = 1) -> int:
+    raw = os.environ.get("TRADINGAGENTS_APP_MAX_WORKERS")
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Invalid TRADINGAGENTS_APP_MAX_WORKERS=%r — using %d", raw, default)
+        return default
+
+
 def run_daily(
     tickers: Optional[Iterable[str]] = None,
     *,
     trade_date: Optional[str] = None,
     top_n: int = 20,
+    max_workers: Optional[int] = None,
 ) -> dict:
     """Run the daily analysis pass for ``tickers`` (defaults to top_n S&P 500).
+
+    When ``max_workers > 1``, ticker analyses run concurrently in a thread
+    pool. **Each worker constructs its own TradingAgentsGraph** because the
+    graph object accumulates per-ticker state on ``self.curr_state`` /
+    ``self.log_states_dict`` / ``self.ticker`` during ``propagate()``;
+    sharing one graph across threads would interleave that state and
+    corrupt the persisted JSON state logs.
+
+    ``max_workers`` precedence: explicit arg → ``TRADINGAGENTS_APP_MAX_WORKERS``
+    env → 1 (serial). The yfinance + FinnHub data sources rate-limit
+    aggressively, and each Gonka TA has its own bandwidth cap (returns
+    HTTP 429 above it), so values above ~8 risk degraded throughput from
+    upstream pushback rather than higher concurrency.
 
     The DB is initialised lazily here so a fresh checkout's first run creates
     the schema without an explicit setup step.
@@ -140,21 +168,63 @@ def run_daily(
     trade_date = trade_date or datetime.utcnow().strftime("%Y-%m-%d")
     run_id = db.start_run(run_date=trade_date, tickers=tickers)
 
+    if max_workers is None:
+        max_workers = _env_max_workers(default=1)
+    max_workers = max(1, min(max_workers, len(tickers)))
+
     config = _build_config()
-    # Build one graph and reuse it across tickers — the LLM clients are
-    # stateless between propagate() calls, and reconstructing the LangGraph
-    # for every ticker is wasteful.
-    graph = TradingAgentsGraph(debug=False, config=config)
+    started = time.monotonic()
+    logger.info(
+        "Daily run start: %d tickers, max_workers=%d, provider=%s, model=%s",
+        len(tickers), max_workers, config.get("llm_provider"), config.get("deep_think_llm"),
+    )
 
     success, failure = 0, 0
-    for ticker in tickers:
-        result = run_one(ticker, trade_date, graph=graph)
-        if result["ok"]:
-            success += 1
-        else:
-            failure += 1
-        logger.info("[%s] %s -> %s", trade_date, ticker, result)
 
+    def _task(ticker: str) -> dict:
+        # One graph per task. Building it is cheap relative to the
+        # propagate() cost (a handful of imports + memory log open), and
+        # keeping it inside the task means each thread owns its own
+        # curr_state / log_states_dict without locking.
+        local_graph = TradingAgentsGraph(debug=False, config=config)
+        return run_one(ticker, trade_date, graph=local_graph)
+
+    if max_workers == 1:
+        # Preserve the serial path verbatim — easier to debug and identical
+        # to pre-concurrency behavior.
+        for ticker in tickers:
+            result = _task(ticker)
+            if result["ok"]:
+                success += 1
+            else:
+                failure += 1
+            logger.info("[%s] %s -> %s", trade_date, ticker, result)
+    else:
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="ticker"
+        ) as pool:
+            futures = {pool.submit(_task, t): t for t in tickers}
+            for fut in as_completed(futures):
+                ticker = futures[fut]
+                try:
+                    result = fut.result()
+                except Exception as exc:
+                    # run_one already catches and persists per-ticker errors,
+                    # so the only way to land here is a bug in graph construction
+                    # itself — log and count as failure.
+                    logger.exception("Task wrapper failed for %s", ticker)
+                    result = {"ticker": ticker, "ok": False, "error": str(exc)}
+                if result["ok"]:
+                    success += 1
+                else:
+                    failure += 1
+                logger.info("[%s] %s -> %s", trade_date, ticker, result)
+
+    elapsed = time.monotonic() - started
+    logger.info(
+        "Daily run finished in %.1fs (%d ok / %d fail across %d tickers)",
+        elapsed, success, failure, len(tickers),
+    )
     db.finish_run(run_id=run_id, success=success, failure=failure)
     return {
         "run_id": run_id,
@@ -162,18 +232,31 @@ def run_daily(
         "tickers": tickers,
         "success": success,
         "failure": failure,
+        "elapsed_seconds": round(elapsed, 1),
     }
 
 
 def _cli() -> int:
-    """Allow ``python -m app.runner [TICKER ...]`` for ad-hoc runs."""
+    """Allow ``python -m app.runner [-j N] [TICKER ...]`` for ad-hoc runs."""
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s — %(message)s",
     )
-    args = sys.argv[1:]
-    tickers = [a.upper() for a in args] if args else None
-    summary = run_daily(tickers)
+    parser = argparse.ArgumentParser(
+        prog="app.runner",
+        description="Run the TradingAgents daily analysis pass.",
+    )
+    parser.add_argument(
+        "-j", "--workers", type=int, default=None,
+        help="number of concurrent tickers (default: env TRADINGAGENTS_APP_MAX_WORKERS or 1)",
+    )
+    parser.add_argument(
+        "tickers", nargs="*",
+        help="tickers to analyse; empty = top-20 S&P 500 from app.sp500",
+    )
+    ns = parser.parse_args()
+    tickers = [t.upper() for t in ns.tickers] if ns.tickers else None
+    summary = run_daily(tickers, max_workers=ns.workers)
     print(summary)
     return 0 if summary.get("failure", 0) == 0 else 1
 
