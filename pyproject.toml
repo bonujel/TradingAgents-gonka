@@ -32,11 +32,26 @@ dependencies = [
     "yfinance>=0.2.63",
 ]
 
+[project.optional-dependencies]
+# Extras for the daily S&P 500 analysis app under app/. The base package
+# stays slim for users who only need the TradingAgents library.
+# gonka-openai signs every request with an ECDSA secp256k1 key; the
+# wheel requires libsecp256k1 headers on Linux (apt install
+# libsecp256k1-dev) unless installed inside a conda env where the
+# wheel ships prebuilt.
+app = [
+    "apscheduler>=3.10.0",
+    "streamlit>=1.36.0",
+    "gonka-openai>=0.2.6",
+]
+
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingagents-app = "app.runner:_cli"
+tradingagents-scheduler = "app.scheduler:start"
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "app*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

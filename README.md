@@ -253,6 +253,88 @@ ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
 
+## Daily S&P 500 App (Gonka × Kimi K2.6)
+
+`app/` packages a small, opinionated app on top of the TradingAgents framework:
+each weekday it runs the multi-agent pipeline against the top-20 S&P 500 names,
+persists the rating and full per-analyst reports to SQLite, and exposes a
+Streamlit dashboard. The LLM backend defaults to **Gonka** — a decentralised
+LLM router exposing OpenAI-compatible endpoints — and **moonshotai/Kimi-K2.6**
+as both the quick and deep model.
+
+### Setup
+
+```bash
+pip install -e ".[app]"
+```
+
+Pick one of the two Gonka transport modes:
+
+```bash
+# (a) Decentralised SDK path — recommended for production.
+echo 'GONKA_PRIVATE_KEY=0x...'                  >> .env  # secp256k1 hex
+echo 'GONKA_SOURCE_URL=https://<gonka-node>'    >> .env  # discovery URL
+
+# (b) Centralised router path — easiest if you only have a routerscan key.
+echo 'GONKA_API_KEY=sk-...'                     >> .env
+```
+
+The client auto-selects: SDK if `GONKA_PRIVATE_KEY` + `GONKA_SOURCE_URL`
+are both set, otherwise router. The `secp256k1` SDK dependency is a C
+extension; on Debian/Ubuntu install `libsecp256k1-dev` first (`apt-get
+install libsecp256k1-dev`), or use a conda env where the wheel ships
+prebuilt.
+
+### One-off run
+
+```bash
+python -m app.runner                       # top-20 S&P 500, today's date
+python -m app.runner NVDA AAPL MSFT        # ad-hoc ticker list
+```
+
+### Daily scheduled run
+
+```bash
+python -m app.scheduler                    # weekdays 16:30 America/New_York
+```
+
+Tune the schedule, ticker universe, and SQLite path via
+`TRADINGAGENTS_APP_*` and `SP500_TICKERS` env vars (see `.env.example`).
+
+### Dashboard
+
+```bash
+streamlit run app/dashboard.py
+```
+
+The dashboard lists every (ticker, trade date) decision row, exposes the
+Portfolio Manager verdict, trader plan, debate transcript, and the four
+analyst reports, and offers an in-page "run now" button for ad-hoc analyses.
+
+### Pointing at a different model via Gonka
+
+```bash
+TRADINGAGENTS_LLM_PROVIDER=gonka \
+TRADINGAGENTS_DEEP_THINK_LLM=Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 \
+TRADINGAGENTS_QUICK_THINK_LLM=moonshotai/Kimi-K2.6 \
+python -m app.runner NVDA
+```
+
+### Router mode caveat — 100s Cloudflare timeout
+
+`api.gonkascan.com` is fronted by Cloudflare with a 100-second
+upstream-response timeout. Reasoning models on the router
+(`moonshotai/Kimi-K2.6` in particular) routinely take longer than that
+for prompts the size of a mid-pipeline TradingAgents call, producing
+HTTP `524` errors that auto-retry but rarely recover within the same
+window. The app defaults to **`Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`**
+(non-reasoning) for that reason — full pipelines finish in ~5 minutes
+with the occasional retry.
+
+If you need Kimi-K2.6's reasoning specifically, switch to the SDK path
+(`GONKA_PRIVATE_KEY` + `GONKA_SOURCE_URL`) — that talks directly to a
+Gonka node and bypasses Cloudflare entirely.
+
 ## Contributing
 
 We welcome contributions from the community! Whether it's fixing a bug, improving documentation, or suggesting a new feature, your input helps make this project better. If you are interested in this line of research, please consider joining our open-source financial AI research community [Tauric Research](https://tauric.ai/).

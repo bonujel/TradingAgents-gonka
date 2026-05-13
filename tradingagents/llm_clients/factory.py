@@ -54,4 +54,11 @@ def create_llm_client(
         from .azure_client import AzureOpenAIClient
         return AzureOpenAIClient(model, base_url, **kwargs)
 
+    if provider_lower == "gonka":
+        # Gonka uses the gonka-openai SDK to sign every request with an ECDSA
+        # key and discover endpoints from a source URL — incompatible with the
+        # static base_url pattern shared by the OpenAI-router providers above.
+        from .gonka_client import GonkaClient
+        return GonkaClient(model, base_url, **kwargs)
+
     raise ValueError(f"Unsupported LLM provider: {provider}")

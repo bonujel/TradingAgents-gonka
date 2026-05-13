@@ -30,6 +30,11 @@ PROVIDER_API_KEY_ENV: dict[str, Optional[str]] = {
     "minimax":    "MINIMAX_API_KEY",
     "minimax-cn": "MINIMAX_CN_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    # Gonka authenticates via ECDSA signatures over each request body, not via
+    # a bearer token. ``GonkaClient`` reads ``GONKA_PRIVATE_KEY`` directly
+    # (the SDK derives the requester address from it), so the
+    # "give me an API key env var" question doesn't really apply here.
+    "gonka":      None,
     # Local runtimes do not authenticate.
     "ollama":     None,
 }

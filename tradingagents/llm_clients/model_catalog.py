@@ -73,6 +73,25 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 }
 
 
+# Gonka routes to a curated set of open-weights models behind an
+# OpenAI-compatible endpoint. Model IDs are returned verbatim by GET
+# https://api.gonkascan.com/v1/models — we mirror the namespaced form
+# ("moonshotai/Kimi-K2.6", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8") rather
+# than aliasing because Gonka's router dispatches by the exact ID.
+_GONKA_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("Kimi-K2.6 - Moonshot flagship via Gonka", "moonshotai/Kimi-K2.6"),
+        ("Qwen3-235B Instruct - via Gonka", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"),
+        ("Custom model ID", "custom"),
+    ],
+    "deep": [
+        ("Kimi-K2.6 - Moonshot flagship via Gonka", "moonshotai/Kimi-K2.6"),
+        ("Qwen3-235B Instruct - via Gonka", "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"),
+        ("Custom model ID", "custom"),
+    ],
+}
+
+
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
@@ -153,6 +172,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # so the two provider keys share one model list.
     "minimax": _MINIMAX_MODELS,
     "minimax-cn": _MINIMAX_MODELS,
+    "gonka": _GONKA_MODELS,
     # OpenRouter: fetched dynamically. Azure: any deployed model name.
     # Ollama display labels intentionally omit a "local" marker — the
     # endpoint is now configurable via OLLAMA_BASE_URL, so the same labels
