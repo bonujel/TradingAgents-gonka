@@ -238,12 +238,46 @@ streamlit run app/dashboard.py             # 看板(默认 :8501)
 
 ---
 
-## 六、未完成 / 已知限制
+## 六、已知限制 / 走不通的路径
 
-- **SDK 路径没真跑过 e2e**——没拿到 Gonka 主网账户。`GonkaClient._build_sdk_llm` 代码路径写好了,等私钥就绪后第一次跑要补一份实测数据。
-- **Kimi K2.6 没在 Gonka 主网上,router 上的是套到 Moonshot 外部**——等真上 Gonka 再测,Streaming + SDK 路径理论上能让它跑通。
-- **多 TA fan-out 未实现**——见 4.4 草图。是榨干 Gonka 算力的关键改动。
-- **LangGraph 节点并行未做**——4 analyst 仍串行,涉及 reducer 重构,排在 fan-out 之后。
-- **20 只全跑 / `-j 8/16` 压测**没做。
-- **Streamlit dashboard 未做真人验收**。
-- **没有单测**:`GonkaStreamSafeChatOpenAI._get_request_payload` 这种 vLLM 兼容边界 fix 应该单测固化。
+### 6.1 Kimi-on-router 实测不可用(2026-05-14)
+
+router + `moonshotai/Kimi-K2.6` + streaming,完整 default 配置,`python -m app.runner -j 4 NVDA AAPL MSFT GOOGL`:
+
+| Ticker | 结果         | 单 ticker | 错误                                                  |
+| ------ | ------------ | --------- | ----------------------------------------------------- |
+| NVDA   | ❌           | ~1m37s    | `RemoteProtocolError: peer closed connection`         |
+| MSFT   | ❌           | ~1m37s    | 同上                                                  |
+| GOOGL  | ❌           | ~1m37s    | 同上                                                  |
+| AAPL   | ✅ Underweight | ~50 min  | 中间过 502,SDK 重试救回                              |
+
+**总耗时 50m6s,1/4 成功**。对比 Qwen3 同配置 13m57s / 4-of-4 → Kimi 慢 3.5×、可靠率 25%。
+
+同一天还试过的几个失败 mode(都集中在 ~90s-12min 范围内随机出一种):
+
+| 错误                                          | 触发条件                                |
+| --------------------------------------------- | --------------------------------------- |
+| `winner stalled waiting for next chunk after 1m30s` | 干净 streaming(没加 extra_body)        |
+| `peer closed connection (incomplete chunked read)`  | 同上,服务端不发错误消息直接 RST          |
+| `502 Bad Gateway`                              | 同上,长跑过程中                         |
+| `500 do_request_failed` (new-api 错误码)       | 加了 `chat_template_kwargs.enable_thinking=true` |
+
+最后一项确认了 **router 不是薄代理,是 `new-api` 网关**——会规范化请求体,vLLM 私有扩展字段过不去,所以**客户端没有任何字段能开 reasoning streaming**(`enable_thinking` / `include_reasoning` / `reasoning: {...}` 全试不可行)。
+
+跨仓事实(`gonka/dev_notes/sp500-tradingagents-gonka-plan.md` 早提过):**Kimi K2.6 当前根本没上 Gonka 主网**,router 上选 Kimi 实际路由到 Gonka 网络外的某个 Moonshot 后端,加上 new-api / Cloudflare / Gonka API 节点三层中间件,server-side 行为不可控。
+
+**结论**:Kimi-on-router 不能上生产。等 Kimi 真上 Gonka + 拿到 SDK 路径再回来测。生产模型保持 Qwen3-235B。代码侧已经把当初为 Kimi 试的 `extra_body` 注入机制回滚干净。
+
+### 6.2 SDK 直连路径 — 普通用户拿不到白名单
+
+详见 [`gonka-sdk-direct-attempt.md`](./gonka-sdk-direct-attempt.md)。简短版:`GonkaClient._build_sdk_llm` 这条代码路径写得对,但 Gonka 主网的链上 `allowed_transfer_addresses` 只放了 7 个治理批准的 transfer agent 地址,**普通用户从私钥派生的地址不在白名单,节点 `403 Transfer Agent not allowed`**。所以 SDK 路径目前不是"私钥够了就能用",而是需要走治理流程。
+
+`GonkaClient` 双模式调度的代码侧已经验证了:私钥+source URL 设全时确实切到 SDK 路径并完成签名构造、端点发现、HTTP 客户端组装——只是最后一步被链上白名单挡了。
+
+### 6.3 未实现 / 未压测
+
+- **多 TA fan-out**(见 §4.4 草图)——前置依赖 SDK 路径可用,现在卡在 6.2。
+- **LangGraph 节点级并行**(单 ticker 内 4 analyst 同跑)——纯客户端改动,不依赖外部状态;ROI 比 fan-out 低。
+- **20 只全跑 / `-j 8 / -j 16` 压测**——单 TA bandwidth cap 未压出过 429。
+- **Streamlit dashboard** 没做真人验收。
+- **没单测**——`GonkaStreamSafeChatOpenAI._get_request_payload` 这种 vLLM 兼容边界应该单测固化。
