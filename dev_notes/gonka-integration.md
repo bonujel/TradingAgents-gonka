@@ -38,7 +38,7 @@
 
 ### 2.2 构造
 
-- **SDK**:`resolve_and_select_endpoint(source_url=...)` → `(url, address)` → `gonka_http_client(private_key, transfer_address)` → `ChatOpenAI(base_url=url, http_client=<signed>)`。
+- **SDK**:`GET {source}/v1/identity` → 取 gateway 的 `transfer_address` → `gonka_http_client(private_key, transfer_address)` → `ChatOpenAI(base_url=f"{source}/v1", http_client=<signed>)`。`source` 推荐 `https://node4.gonka.ai`(public inference gateway,自带白名单地址)。详见 [`gonka-sdk-direct-attempt.md`](./gonka-sdk-direct-attempt.md)。
 - **Router**:`ChatOpenAI(base_url="https://api.gonkascan.com/v1", api_key=<bearer>)`,普通 langchain-openai 调用,无任何 Gonka SDK。
 
 ### 2.3 默认开 streaming
@@ -108,7 +108,7 @@ GET /v1/epochs/current/participants    → 当前 epoch 的活跃 participants(�
 
 > Gonka 主网当前对外推理模型是 `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`,**Kimi K2.6 还没上线**。
 
-→ Router 上"能选 Kimi"实际是路由到 Gonka 网络**外**的 Moonshot 后端(也解释了为什么 Kimi-on-router 比 Qwen 慢一个量级,且 SDK 路径救不了它)。**真正用 Gonka 算力的 = Qwen3-235B**。
+**(已过时,2026-05-15 勘误)** Kimi-K2.6 现在已在 Gonka 主网上:`https://node4.gonka.ai/v1/models` 同时列出 Qwen3-235B 和 `moonshotai/Kimi-K2.6`,55 个活跃 participants 中 23 个声明支持 Kimi。SDK 路径同样能跑 Kimi(NVDA 单 ticker 7/7 签名 POST 200,见 [`gonka-sdk-direct-attempt.md`](./gonka-sdk-direct-attempt.md))。Kimi-on-router 仍比 Qwen 慢一个量级,但原因是**模型本身参数大 + 生成 token 多**,不再是"路由到外部 Moonshot"。
 
 ---
 
@@ -264,19 +264,23 @@ router + `moonshotai/Kimi-K2.6` + streaming,完整 default 配置,`python -m app
 
 最后一项确认了 **router 不是薄代理,是 `new-api` 网关**——会规范化请求体,vLLM 私有扩展字段过不去,所以**客户端没有任何字段能开 reasoning streaming**(`enable_thinking` / `include_reasoning` / `reasoning: {...}` 全试不可行)。
 
-跨仓事实(`gonka/dev_notes/sp500-tradingagents-gonka-plan.md` 早提过):**Kimi K2.6 当前根本没上 Gonka 主网**,router 上选 Kimi 实际路由到 Gonka 网络外的某个 Moonshot 后端,加上 new-api / Cloudflare / Gonka API 节点三层中间件,server-side 行为不可控。
+**结论**:Kimi-on-router 不能上生产。问题不是"Kimi 没在 Gonka 主网"(2026-05-15 已确认在),而是 Kimi 模型本身生成更慢 + 经过 new-api/CF/Gonka API 节点三层中间件后服务端行为不可控。生产模型保持 Qwen3-235B。代码侧已经把当初为 Kimi 试的 `extra_body` 注入机制回滚干净。SDK 直连 + Kimi 走通了 7/7 签名 POST(见 6.2 + `gonka-sdk-direct-attempt.md`),长期看是更稳定的选择,但单调用速度仍受 Kimi 模型本身限制。
 
-**结论**:Kimi-on-router 不能上生产。等 Kimi 真上 Gonka + 拿到 SDK 路径再回来测。生产模型保持 Qwen3-235B。代码侧已经把当初为 Kimi 试的 `extra_body` 注入机制回滚干净。
+### 6.2 SDK 直连路径 — 已走通(2026-05-15 修订)
 
-### 6.2 SDK 直连路径 — 普通用户拿不到白名单
+> **前一版结论"SDK 被白名单挡"是基于错误的心智模型**——把"用户签名身份"和"transfer-agent 身份"混成了一件事。详细修正见 [`gonka-sdk-direct-attempt.md`](./gonka-sdk-direct-attempt.md)。
 
-详见 [`gonka-sdk-direct-attempt.md`](./gonka-sdk-direct-attempt.md)。简短版:`GonkaClient._build_sdk_llm` 这条代码路径写得对,但 Gonka 主网的链上 `allowed_transfer_addresses` 只放了 7 个治理批准的 transfer agent 地址,**普通用户从私钥派生的地址不在白名单,节点 `403 Transfer Agent not allowed`**。所以 SDK 路径目前不是"私钥够了就能用",而是需要走治理流程。
+正确做法:`GONKA_SOURCE_URL=https://node4.gonka.ai`,SDK 客户端通过 `GET {source}/v1/identity` 拿到 gateway 自己的 transfer-agent 地址(已在链上 `allowed_transfer_addresses` 7 个白名单地址之一),再用用户私钥签名+gateway 身份转发。
 
-`GonkaClient` 双模式调度的代码侧已经验证了:私钥+source URL 设全时确实切到 SDK 路径并完成签名构造、端点发现、HTTP 客户端组装——只是最后一步被链上白名单挡了。
+实测(2026-05-15):
+- NVDA + Qwen3-235B,657.5s,rating=Buy,27+/27+ 签名 POST 全 200
+- NVDA + Kimi-K2.6,杀进程前已完成 7/7 签名 POST 全 200,核心路径无任何 403/405/308
+
+`GonkaClient._build_sdk_llm` 已切到 gateway 模式(commit `afbde4a`),`GONKA_ENDPOINTS` 显式劝退(设置会跳过 SDK 自己的白名单过滤)。
 
 ### 6.3 未实现 / 未压测
 
-- **多 TA fan-out**(见 §4.4 草图)——前置依赖 SDK 路径可用,现在卡在 6.2。
+- **多 TA fan-out**(见 §4.4 草图)——SDK 路径既然走通了,这一项不再被前置阻塞,优先级回升。
 - **LangGraph 节点级并行**(单 ticker 内 4 analyst 同跑)——纯客户端改动,不依赖外部状态;ROI 比 fan-out 低。
 - **20 只全跑 / `-j 8 / -j 16` 压测**——单 TA bandwidth cap 未压出过 429。
 - **Streamlit dashboard** 没做真人验收。
