@@ -3,9 +3,11 @@
 Gonka exposes two ways to talk to the network:
 
 **SDK / decentralised mode** — the ``gonka-openai`` SDK signs every request with
-an ECDSA secp256k1 key, derives the requester's gonka address via bech32, and
-discovers a backing endpoint from a ``source_url`` (a Gonka network node). This
-is the "Gonka-native" path.
+an ECDSA secp256k1 key. ``GONKA_SOURCE_URL`` should point at a public inference
+gateway (e.g. ``https://node4.gonka.ai``); we GET ``{source}/v1/identity`` to
+discover the gateway's whitelisted ``transfer_address`` and route the signed
+request through ``{source}/v1``. The signing key pays; the gateway's identity
+satisfies the on-chain ``transfer_agent_access_params`` whitelist.
 
 **Router mode** — ``api.gonkascan.com/v1`` is a centralised OpenAI-compatible
 proxy that performs the signing on the user's behalf; clients just present a
@@ -155,16 +157,40 @@ class GonkaClient(BaseLLMClient):
             llm_kwargs.setdefault(key, self.kwargs.get(key, value))
 
     def _build_sdk_llm(self, source_url: str, private_key: str) -> Any:
-        from gonka_openai import gonka_http_client, resolve_and_select_endpoint
+        import httpx
+        from gonka_openai import gonka_http_client
 
-        _endpoints, selected = resolve_and_select_endpoint(source_url=source_url)
+        # Treat GONKA_SOURCE_URL as a public inference gateway and ask it
+        # who it is via /v1/identity. The returned 'data.address' is the
+        # gateway's on-chain transfer-agent identity — one of the seven
+        # addresses in transfer_agent_access_params.allowed_transfer_addresses.
+        # The user's own private key still signs every request (and pays),
+        # but the transfer_address that participants validate against is the
+        # gateway's, not the user's. This matches the SDK's official
+        # quickstart and avoids two pitfalls of resolve_and_select_endpoint:
+        #   - chain-api participant enumeration, which the public gateway
+        #     domain (node4.gonka.ai) does not expose
+        #   - random participant selection, which can land on a stale node
+        #     whose registered URL 308-redirects POST requests
+        src = source_url.rstrip("/")
+        try:
+            resp = httpx.get(f"{src}/v1/identity", timeout=30)
+            resp.raise_for_status()
+            transfer_address = resp.json()["data"]["address"]
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"Failed to fetch transfer-agent identity from "
+                f"{src}/v1/identity: {exc}. GONKA_SOURCE_URL must point at "
+                f"a Gonka public inference gateway (e.g. https://node4.gonka.ai)."
+            ) from exc
+
         http_client = gonka_http_client(
             private_key=private_key,
-            transfer_address=selected.address,
+            transfer_address=transfer_address,
         )
         llm_kwargs: dict[str, Any] = {
             "model": self.model,
-            "base_url": selected.url,
+            "base_url": f"{src}/v1",
             "http_client": http_client,
             # OpenAI SDK rejects construction without an api_key, but the
             # signed request bypasses bearer-token auth on the wire.
