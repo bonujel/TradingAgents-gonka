@@ -136,13 +136,43 @@ def _save_active_tasks(tasks: list) -> None:
     tmp.replace(_ACTIVE_TASKS_PATH)
 
 
-# Module-level Popen registry. Streamlit re-imports the script on every
-# interaction but the module object is cached, so this dict survives reruns
-# within a single ``streamlit run`` session. We keep handles here so we can
-# call ``.poll()`` and properly reap exited children — otherwise a finished
-# runner stays as a zombie in the kernel process table and ``os.kill(pid, 0)``
-# misreports it as still alive, leaving the task stuck on "running" forever.
-_PROC_HANDLES: dict[int, subprocess.Popen] = {}
+# Popen handles for runners spawned during the current ``streamlit run`` —
+# stashed via ``@st.cache_resource`` because Streamlit re-executes the script
+# top-to-bottom on every interaction, which would reset a plain module-level
+# dict every rerun and make ``poll()``-based liveness silently fail on the
+# very next refresh. ``cache_resource`` returns the same dict across reruns
+# (and across browser sessions), giving us the singleton behavior we need.
+@st.cache_resource
+def _proc_handles() -> dict[int, subprocess.Popen]:
+    return {}
+
+
+def _pid_state_via_ps(pid: int) -> Optional[bool]:
+    """Cross-platform fallback when we have no ``Popen`` handle.
+
+    ``ps -p PID -o stat=`` works on Linux and macOS:
+      - exit 1 means the PID is gone
+      - stdout's first char is the state code: ``R``/``S``/``D`` = alive,
+        ``Z`` = zombie (treat as dead — the runner is finished but its
+        parent hasn't reaped it).
+
+    Returns ``None`` on unexpected errors so the caller can decide.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return False
+    state = result.stdout.strip()
+    if not state:
+        return False
+    return not state.startswith("Z")
 
 
 def _is_alive(pid: int) -> bool:
@@ -154,29 +184,18 @@ def _is_alive(pid: int) -> bool:
        ``poll()`` is authoritative — it returns ``None`` for running,
        an int exit code once the child terminates (and reaps the zombie).
     2. Otherwise (dashboard restarted while a run was in flight, leaving
-       only ``active_tasks.json`` behind), fall back to ``/proc/<pid>/status``
-       on Linux: a missing entry means the PID is gone; ``State: Z*`` means
-       it's a zombie owned by a now-defunct parent and should be treated
-       as dead even though ``kill(0)`` still succeeds against it.
+       only ``active_tasks.json`` behind), fall back to ``ps -p PID -o stat=``.
+       This works on both Linux and macOS, unlike the old ``/proc`` probe.
     """
-    proc = _PROC_HANDLES.get(pid)
+    proc = _proc_handles().get(pid)
     if proc is not None:
         return proc.poll() is None
-
-    status = Path(f"/proc/{pid}/status")
-    if not status.exists():
-        return False
-    try:
-        for line in status.read_text().splitlines():
-            if line.startswith("State:"):
-                state = line.split()[1] if len(line.split()) > 1 else ""
-                return not state.startswith("Z")
-    except OSError:
-        return False
-    return True
+    via_ps = _pid_state_via_ps(pid)
+    return bool(via_ps) if via_ps is not None else False
 
 
 def _prune_active_tasks(tasks: list) -> list:
+    handles = _proc_handles()
     alive = []
     for task in tasks:
         if _is_alive(task["pid"]):
@@ -184,7 +203,7 @@ def _prune_active_tasks(tasks: list) -> list:
         else:
             # Drop the Popen handle so the registry doesn't grow unbounded
             # across many launch/finish cycles in one dashboard session.
-            _PROC_HANDLES.pop(task["pid"], None)
+            handles.pop(task["pid"], None)
     return alive
 
 
@@ -209,9 +228,10 @@ def _start_run(settings: dict, tickers: list[str], workers: int) -> dict:
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    # Hand the handle to the module-level registry so the next ``poll()`` on
-    # the prune cycle reaps it cleanly instead of leaving a zombie behind.
-    _PROC_HANDLES[proc.pid] = proc
+    # Hand the handle to the cache_resource-backed registry so the next
+    # ``poll()`` on the prune cycle reaps it cleanly instead of leaving a
+    # zombie behind. ``_proc_handles()`` returns the same dict across reruns.
+    _proc_handles()[proc.pid] = proc
 
     task = {
         "pid": proc.pid,
