@@ -35,7 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from app import db  # noqa: E402
-from app.sp500 import get_top_tickers  # noqa: E402
+from app.sp500 import get_sp500_tickers, get_top_tickers  # noqa: E402
 
 
 # ─── Paths and constants ────────────────────────────────────────────────────
@@ -359,10 +359,25 @@ def page_tasks() -> None:
         )
 
     st.subheader("Start new analysis")
-    default_tickers = ",".join(get_top_tickers(20))
+    if "tickers_input" not in st.session_state:
+        st.session_state["tickers_input"] = ",".join(get_top_tickers(20))
+
+    def _fill_full_sp500() -> None:
+        # Runs before the widget re-renders, so the new value flows in cleanly.
+        st.session_state["tickers_input"] = ",".join(get_sp500_tickers())
+
+    st.button(
+        "Fill with full S&P 500",
+        on_click=_fill_full_sp500,
+        help=(
+            "Replace the textbox with the full S&P 500 constituent list "
+            "(scraped from Wikipedia, cached for 7 days; falls back to the "
+            "top-30 static list if offline)."
+        ),
+    )
     tickers_input = st.text_area(
         "Tickers (comma-separated)",
-        value=default_tickers,
+        key="tickers_input",
         help="Defaults to the top-20 S&P 500 constituents by market cap.",
     )
     workers = st.number_input(
