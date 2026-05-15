@@ -1,23 +1,19 @@
 # Quick Start
 
-> 给新接手这个项目的同学:跟着跑完这五步就能起来。
-> 实现细节 / 实测数据 / 常见坑见 [gonka-integration.md](./gonka-integration.md)。
+> 架构、实测数据与已知限制见 [gonka-integration.md](./gonka-integration.md)。
 
----
+## 1. 前置条件
 
-## 0. 前置条件
+- Git 与 Python 3.11(Linux 或 macOS,aarch64 / x86_64 均支持)
+- Gonka router API key(`sk-...`),由 [router.gonkascan.com](https://router.gonkascan.com/dashboard) 申请
 
-- Git + Linux/macOS(aarch64 / x86_64 都行)
-- 一个 Gonka **router API key**(`sk-...`),在 [router.gonkascan.com](https://router.gonkascan.com/dashboard) dashboard 自助申请
-
-## 1. 装环境(一次性,~5 分钟)
+## 2. 安装
 
 ```bash
 git clone -b gonka-tradeagents-kimi/v1 git@github.com:bonujel/TradingAgents-gonka.git
 cd TradingAgents-gonka
 
-# 推荐 conda:secp256k1 / numpy 等 C 扩展有预编译 wheel,
-# 省得装系统级 libsecp256k1-dev / build-essential。
+# Conda(推荐;避免 secp256k1 等 C 扩展的系统级构建依赖)
 curl -fsSL -o /tmp/mc.sh \
   https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh
 bash /tmp/mc.sh -b -p ~/miniconda3
@@ -29,74 +25,57 @@ conda create -n tradingagents python=3.11 -y && conda activate tradingagents
 pip install -e ".[app]"
 ```
 
-> 不想用 conda?
-> `apt install libsecp256k1-dev build-essential pkg-config` 后用 venv + pip 也行。
+如使用 venv,需先安装系统依赖:`libsecp256k1-dev build-essential pkg-config`。
 
-## 2. 配 `.env`
+## 3. 配置
 
 ```bash
 cp .env.example .env
-# 在 .env 里至少加这两行(其它默认值都已在 .env.example 里):
-GONKA_API_KEY=sk-你的router-key
+```
+
+最少需配置以下两项,其余可沿用默认:
+
+```
+GONKA_API_KEY=sk-...
 TRADINGAGENTS_APP_MAX_WORKERS=4
 ```
 
-模型不用单独配 —— `app/runner.py` 在 `TRADINGAGENTS_LLM_PROVIDER` 没设时
-自动默认走 `gonka` provider + `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`,
-streaming 默认开,是验证过的稳定组合。
-要换模型 / 切到 SDK 路径见 [gonka-integration.md §5.2](./gonka-integration.md)。
+未显式设置 `TRADINGAGENTS_LLM_PROVIDER` 时,`app/runner.py` 默认使用 `gonka` provider 与 `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`,streaming 默认开启。更换模型或启用 SDK 路径见 [gonka-integration.md §5.2](./gonka-integration.md)。
 
-## 3. 端到端验证(~5 分钟)
+## 4. 端到端验证
 
 ```bash
 conda activate tradingagents
-python -m app.runner NVDA          # 单 ticker,跑通 + 入库
+python -m app.runner NVDA
 ```
 
-成功标志:终端最后两行是
+预期输出包含 `[NVDA] propagate complete` 与 `{'ticker': 'NVDA', 'ok': True, ...}`,数据库写入一条记录。典型耗时 5-15 分钟。
 
-```
-[NVDA] propagate complete
-[2026-05-13] NVDA -> {'ticker': 'NVDA', 'ok': True, 'rating': 'Buy'}
-```
+## 5. 常用命令
 
-## 4. 日常使用
+| 用途                       | 命令                                          |
+| -------------------------- | --------------------------------------------- |
+| 跑默认 top-20 S&P 500      | `python -m app.runner -j 4`                   |
+| 跑指定 ticker              | `python -m app.runner -j 4 NVDA AAPL ...`     |
+| 启动调度器(前台进程)     | `python -m app.scheduler`                     |
+| 启动看板(默认 `:8501`)   | `streamlit run app/dashboard.py`              |
 
-```bash
-# 跑批:默认 top-20 S&P 500,4 worker 并行(约 30 分钟)
-python -m app.runner -j 4
+## 6. 数据库
 
-# 调度器:周一-周五 16:30 America/New_York 自动跑,前台进程,Ctrl-C 退
-python -m app.scheduler
-
-# 看板:浏览器开 http://localhost:8501
-streamlit run app/dashboard.py
-```
-
-## 5. 查数据库
-
-SQLite 默认落在 `~/.tradingagents/app/decisions.sqlite3`,
-按 `(ticker, trade_date)` 唯一。直接 SQL 查:
+默认路径 `~/.tradingagents/app/decisions.sqlite3`,可通过 `TRADINGAGENTS_APP_DB` 覆盖。`decisions` 表以 `(ticker, trade_date)` 为唯一键。
 
 ```bash
 sqlite3 ~/.tradingagents/app/decisions.sqlite3 \
-  'select ticker, rating, created_at from decisions
-   order by trade_date desc, ticker asc;'
+  'SELECT ticker, rating, created_at FROM decisions
+   ORDER BY trade_date DESC, ticker ASC;'
 ```
 
-要换路径:`export TRADINGAGENTS_APP_DB=/your/path.sqlite3`。
+## 7. 故障排查
 
----
-
-## 遇到问题排查方向
-
-| 现象                              | 看哪里                              |
-| --------------------------------- | ----------------------------------- |
-| 装 `secp256k1` 报错               | 用 conda 装,或装 `libsecp256k1-dev` |
-| 跑起来卡很久没输出                | 正常,单 ticker ~5-15 分钟,看进度日志 |
-| HTTP 524 错误                     | router 上 CF 100s 超时;确认 streaming 没被关 + 用 Qwen3 不要用 Kimi |
-| `messages[i].content must not be empty` | 老版本 bug,确认 commit ≥ `85b1ccd` |
-| 想换 Kimi-K2.6                    | 暂时别换,见 [gonka-integration.md §3.4](./gonka-integration.md) |
-
-更详细的诊断 / 架构 / 优化路径见 [gonka-integration.md](./gonka-integration.md);
-今日工作汇总见 [daily-2026-05-13.md](./daily-2026-05-13.md)。
+| 现象                                        | 处理                                                            |
+| ------------------------------------------- | --------------------------------------------------------------- |
+| 安装 `secp256k1` 失败                       | 使用 conda 环境,或安装 `libsecp256k1-dev`                       |
+| 终端长时间无输出                            | 单 ticker 运行约 5-15 分钟,通过 INFO 级日志观察进度             |
+| HTTP 524 / `peer closed connection`         | 确认 streaming 未被关闭;切换至 Qwen3                            |
+| `messages[i].content must not be empty`     | 升级至 commit `85b1ccd` 或更新版本                              |
+| 使用 Kimi-K2.6 失败                         | router 路径下不可用,详见 [gonka-integration.md §6.1](./gonka-integration.md) |
