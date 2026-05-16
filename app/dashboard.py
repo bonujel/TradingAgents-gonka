@@ -303,7 +303,7 @@ def _render_decision(row) -> None:
         return
 
     if row["final_decision"]:
-        with st.expander("Portfolio Manager decision", expanded=True):
+        with st.expander("Portfolio Manager decision"):
             st.markdown(row["final_decision"])
     if row["trader_plan"]:
         with st.expander("Trader plan"):
@@ -355,9 +355,35 @@ def page_decisions() -> None:
     st.markdown(
         f"**{len(rows)} tickers** · {success} succeeded · {failure} failed"
     )
-    for row in rows:
+
+    # Render in batches — each row carries up to ~30KB of markdown across
+    # several expanders; rendering all of them at once for a full S&P 500 run
+    # ships several MB of payload over websocket and freezes the browser.
+    # Default to 20 rows; user can bump the slider when a specific batch is
+    # needed, or apply the ticker filter above to skip pagination entirely.
+    page_size = 20
+    total = len(rows)
+    if total > page_size:
+        shown = st.slider(
+            "Rows to render",
+            min_value=page_size,
+            max_value=total,
+            value=page_size,
+            step=page_size,
+            help="Increase to render more rows. Each batch ~30KB markdown × N.",
+        )
+    else:
+        shown = total
+
+    for row in rows[:shown]:
         _render_decision(row)
         st.divider()
+
+    if shown < total:
+        st.caption(
+            f"Showing first {shown} of {total}. Drag the slider or "
+            f"narrow with the Ticker filter above to see specific rows."
+        )
 
 
 # ─── Page: Tasks ────────────────────────────────────────────────────────────
