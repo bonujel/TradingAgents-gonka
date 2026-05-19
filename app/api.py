@@ -89,6 +89,8 @@ class ScheduleUpdate(BaseModel):
     interval_hours: int = Field(ge=1, le=168)
     workers: int = Field(ge=1, le=16)
     tickers: list[str] = Field(default_factory=list)
+    pause_clears_pending: Optional[bool] = None
+    clear_pending: bool = False
 
 
 # ─── Info / settings ──────────────────────────────────────────────────────
@@ -318,8 +320,21 @@ def get_schedule() -> dict[str, Any]:
 @app.put("/api/schedule")
 def put_schedule(body: ScheduleUpdate) -> dict[str, Any]:
     cleaned_tickers = [t.strip().upper() for t in body.tickers if t.strip()]
-    cfg = body.model_dump()
-    cfg["tickers"] = cleaned_tickers
+    current = schedule_store.load_schedule()
+    incoming = body.model_dump()
+    incoming.pop("clear_pending", None)
+    pause_clears_pending = incoming.pop("pause_clears_pending")
+
+    cfg = {
+        **current,
+        **incoming,
+        "tickers": cleaned_tickers,
+    }
+    if pause_clears_pending is not None:
+        cfg["pause_clears_pending"] = pause_clears_pending
+    if body.clear_pending or (not cfg["enabled"] and cfg.get("pause_clears_pending")):
+        cfg["pending_catch_up"] = False
+        cfg["missed_count"] = 0
     schedule_store.save_schedule(cfg)
     scheduler_thread.reload_schedule()
     return _schedule_payload()

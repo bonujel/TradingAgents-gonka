@@ -75,6 +75,14 @@ export interface ScheduleConfig {
   interval_hours: number;
   workers: number;
   tickers: string[];
+  pending_catch_up?: boolean;
+  missed_count?: number;
+  last_missed_at?: string | null;
+  last_catch_up_at?: string | null;
+  last_regular_fire_at?: string | null;
+  last_start_error?: string | null;
+  pause_clears_pending?: boolean;
+  clear_pending?: boolean;
 }
 
 export interface ScheduleResponse {

@@ -42,6 +42,53 @@
       />
     </section>
 
+    <section
+      v-if="schedule?.config.pending_catch_up || schedule?.config.last_start_error"
+      class="card space-y-3 border-amber-500/30 bg-amber-500/5 p-4 text-sm"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="font-semibold text-amber-100">
+            {{ schedule?.config.pending_catch_up ? "Catch-up pending" : "Schedule attention" }}
+          </div>
+          <p class="mt-1 text-xs text-amber-100/75">
+            Missed scheduled fires are coalesced into one catch-up run. The catch-up
+            starts automatically when the scheduled slot is free.
+          </p>
+        </div>
+        <button
+          v-if="schedule?.config.pending_catch_up"
+          class="btn"
+          type="button"
+          :disabled="saving"
+          @click="clearPending"
+        >
+          Clear pending
+        </button>
+      </div>
+      <div class="grid gap-2 text-xs text-amber-100/80 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <span class="label">Missed fires</span>
+          <div class="mt-1 font-mono text-white">{{ schedule?.config.missed_count ?? 0 }}</div>
+        </div>
+        <div>
+          <span class="label">Last missed</span>
+          <div class="mt-1 font-mono text-white">{{ formatMaybeIso(schedule?.config.last_missed_at) }}</div>
+        </div>
+        <div>
+          <span class="label">Last catch-up</span>
+          <div class="mt-1 font-mono text-white">{{ formatMaybeIso(schedule?.config.last_catch_up_at) }}</div>
+        </div>
+        <div>
+          <span class="label">Last regular fire</span>
+          <div class="mt-1 font-mono text-white">{{ formatMaybeIso(schedule?.config.last_regular_fire_at) }}</div>
+        </div>
+      </div>
+      <p v-if="schedule?.config.last_start_error" class="text-xs text-red-200">
+        Last start error: <span class="font-mono">{{ schedule.config.last_start_error }}</span>
+      </p>
+    </section>
+
     <section class="card space-y-5 p-5">
       <div class="flex items-center justify-between gap-3">
         <h3 class="text-sm font-semibold uppercase tracking-wider text-gonka-muted">
@@ -259,6 +306,10 @@ function formatIso(iso: string): string {
   return iso.replace("T", " ").slice(0, 19);
 }
 
+function formatMaybeIso(iso?: string | null): string {
+  return iso ? formatIso(iso) : "—";
+}
+
 function errorMessage(e: unknown): string {
   if (typeof e === "object" && e !== null && "data" in e) {
     const data = (e as { data?: { detail?: string } }).data;
@@ -342,6 +393,32 @@ async function saveAndEnable() {
 
 async function disableSchedule() {
   await persist(false);
+}
+
+async function clearPending() {
+  const cfg = schedule.value?.config;
+  if (!cfg) return;
+  saving.value = true;
+  message.value = "";
+  error.value = "";
+  try {
+    schedule.value = await api.putSchedule({
+      enabled: cfg.enabled,
+      start_hour: cfg.start_hour,
+      start_minute: cfg.start_minute,
+      interval_hours: cfg.interval_hours,
+      workers: cfg.workers,
+      tickers: cfg.tickers,
+      clear_pending: true,
+    });
+    serverEpochMs.value = new Date(schedule.value.server_time.now).getTime();
+    lastSync.value = Date.now();
+    message.value = "Pending catch-up cleared.";
+  } catch (e) {
+    error.value = errorMessage(e);
+  } finally {
+    saving.value = false;
+  }
 }
 
 onMounted(async () => {
