@@ -3,8 +3,30 @@
 from typing import List, Optional
 from pathlib import Path
 import re
+import threading
 
 from tradingagents.agents.utils.rating import parse_rating
+
+
+# Per-path lock registry. The runner spawns multiple TradingAgentsGraph
+# instances (one per worker thread in ThreadPoolExecutor) and each builds its
+# own TradingMemoryLog, but those instances all point at the same on-disk
+# file. A per-instance Lock wouldn't serialise them; a per-path Lock does.
+# Keyed by Path.resolve() so symlinks / cwd-relative paths collapse to one
+# lock. The registry itself is guarded by _REGISTRY_LOCK so two threads
+# constructing the first MemoryLog for the same file can't race the dict.
+_FILE_LOCKS: dict[Path, threading.Lock] = {}
+_REGISTRY_LOCK = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    resolved = path.resolve()
+    with _REGISTRY_LOCK:
+        lock = _FILE_LOCKS.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_LOCKS[resolved] = lock
+        return lock
 
 
 class TradingMemoryLog:
@@ -19,10 +41,12 @@ class TradingMemoryLog:
     def __init__(self, config: dict = None):
         cfg = config or {}
         self._log_path = None
+        self._lock: Optional[threading.Lock] = None
         path = cfg.get("memory_log_path")
         if path:
             self._log_path = Path(path).expanduser()
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._lock = _lock_for(self._log_path)
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
 
@@ -34,20 +58,26 @@ class TradingMemoryLog:
         trade_date: str,
         final_trade_decision: str,
     ) -> None:
-        """Append pending entry at end of propagate(). No LLM call."""
+        """Append pending entry at end of propagate(). No LLM call.
+
+        Locked: the idempotency check + append must be one critical section.
+        Without the lock, two workers analysing the same (ticker, trade_date)
+        could both pass the "is it already there?" scan and double-append.
+        """
         if not self._log_path:
             return
-        # Idempotency guard: fast raw-text scan instead of full parse
-        if self._log_path.exists():
-            raw = self._log_path.read_text(encoding="utf-8")
-            for line in raw.splitlines():
-                if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("| pending]"):
-                    return
-        rating = parse_rating(final_trade_decision)
-        tag = f"[{trade_date} | {ticker} | {rating} | pending]"
-        entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
-        with open(self._log_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+        with self._lock:
+            # Idempotency guard: fast raw-text scan instead of full parse
+            if self._log_path.exists():
+                raw = self._log_path.read_text(encoding="utf-8")
+                for line in raw.splitlines():
+                    if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("| pending]"):
+                        return
+            rating = parse_rating(final_trade_decision)
+            tag = f"[{trade_date} | {ticker} | {rating} | pending]"
+            entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(entry)
 
     # --- Read path (Phase A) ---
 
@@ -111,10 +141,36 @@ class TradingMemoryLog:
         Finds the first pending entry matching (trade_date, ticker), updates
         its tag with return figures, and appends a REFLECTION section.  Uses
         a temp-file + os.replace() so a crash mid-write never corrupts the log.
+
+        Locked: classic read-modify-write — two unsynchronised workers would
+        both read the same pre-state, append their own update, and the second
+        rename() would overwrite the first one's entry (lost-update race).
+        Also prevents FileNotFoundError on the .tmp swap when both writers
+        race the rename.
         """
         if not self._log_path or not self._log_path.exists():
             return
 
+        with self._lock:
+            self._rewrite_with_update(
+                ticker=ticker,
+                trade_date=trade_date,
+                raw_return=raw_return,
+                alpha_return=alpha_return,
+                holding_days=holding_days,
+                reflection=reflection,
+            )
+
+    def _rewrite_with_update(
+        self,
+        *,
+        ticker: str,
+        trade_date: str,
+        raw_return: float,
+        alpha_return: float,
+        holding_days: int,
+        reflection: str,
+    ) -> None:
         text = self._log_path.read_text(encoding="utf-8")
         blocks = text.split(self._SEPARATOR)
 
@@ -167,10 +223,18 @@ class TradingMemoryLog:
 
         Each element of updates must have keys: ticker, trade_date,
         raw_return, alpha_return, holding_days, reflection.
+
+        Locked: same lost-update / FileNotFoundError race as
+        ``update_with_outcome``. The entire read-modify-rename cycle must
+        be atomic relative to other workers writing the same file.
         """
         if not self._log_path or not self._log_path.exists() or not updates:
             return
 
+        with self._lock:
+            self._rewrite_with_batch(updates)
+
+    def _rewrite_with_batch(self, updates: List[dict]) -> None:
         text = self._log_path.read_text(encoding="utf-8")
         blocks = text.split(self._SEPARATOR)
 
