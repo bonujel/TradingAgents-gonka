@@ -233,7 +233,8 @@ python -m app.runner NVDA                  # 单 ticker
 python -m app.runner -j 4 NVDA AAPL MSFT GOOGL  # 4 并发
 python -m app.runner                       # 默认 top-20
 python -m app.scheduler                    # 调度(前台,Ctrl-C 退)
-streamlit run app/dashboard.py             # 看板(默认 :8501)
+uvicorn app.api:app --port 8000            # 后端 API(默认 :8000)
+cd frontend && npm install && npm run dev  # 前端 Nuxt(默认 :3000)
 ```
 
 ---

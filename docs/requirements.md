@@ -132,36 +132,52 @@ scheduler MUST be runnable as a standalone foreground process.
 
 ## 4. Dashboard requirements
 
-The dashboard is a Streamlit application that operators use to monitor
-and control the system. It MUST expose three pages, navigable from a
-sidebar.
+The dashboard is a split frontend/backend application: a FastAPI service
+(`app.api:app`) over JSON, and a Nuxt 3 SPA in `frontend/`. The two
+processes run independently and communicate over HTTP, with CORS
+restricted to the configured frontend origin. Operators interact only
+with the SPA, which MUST expose three pages, navigable from a sidebar.
+
+The backend MUST run with a single uvicorn worker. The active-task
+registry lives in the worker that owns the runner's `Popen` handle;
+multiple workers would split that registry and lose Stop targets.
+
+The backend MUST NOT return private keys or API tokens in cleartext.
+Settings endpoints return a redacted preview (`••••` + last 4 chars) and
+a boolean indicating whether the secret is populated; clients are
+expected to leave the field blank to keep the stored value unchanged.
 
 ### 4.1 Decisions page
 
 * Lists all stored decisions for a selected trade date.
-* Allows filtering by ticker.
+* Allows filtering by ticker (client-side substring match on the
+  symbols returned by the API).
 * Renders each decision as a card with: ticker symbol, colour-coded
-  rating badge, model attribution, and expanders for the PM decision,
-  trader plan, research verdict, and the four analyst reports.
-* Surfaces failed runs with their error message in a visually
-  distinguishable form.
+  rating badge, model attribution, trade-date chip, and collapsible
+  sections for the PM decision, trader plan, research verdict, and the
+  four analyst reports.
+* Surfaces failed runs with the error message in a visually
+  distinguishable form (red accent + monospace traceback).
+* Paginates results to keep DOM size and websocket payload bounded; the
+  default page size MUST be configurable from the UI.
 
 ### 4.2 Tasks page
 
 * Displays summary metrics for the active connection: mode (Router or
-  SDK), default deep model, default worker count.
-* Provides an inline form to launch a new run, with the ticker list
-  pre-populated from the configured default (top 20 S&P 500).
+  SDK), default deep model, default worker count, configured-or-not flag.
+* Provides an inline form to launch a new run, with one click to load
+  the top-20 default and another to load the full S&P 500.
 * Lists active runs with PID, elapsed time, mode, model, ticker list, a
-  log-tail expander (last 30 lines), and a Stop button per run.
+  log-tail expander (last 30 lines, auto-refreshing every 4 seconds
+  while open), and a Stop button per run.
 * Lists the most recent runs from the persistent `run_log` table with
   outcome counts and total elapsed time.
 * MUST detect process termination correctly, including the zombie state
   that follows un-`wait()`-ed children. A finished run MUST disappear
-  from the active list within one page refresh.
-* Launching a run MUST NOT block the dashboard. Runs MUST be spawned as
-  detached subprocesses in their own process group, so that a Stop
-  button can signal the entire process tree via `killpg(SIGTERM)`.
+  from the active list within one polling interval (default 4 s).
+* Launching a run MUST NOT block the API thread. Runs MUST be spawned
+  as detached subprocesses in their own process group, so that a Stop
+  request can signal the entire process tree via `killpg(SIGTERM)`.
 * The Run button MUST be disabled when the currently-selected
   connection mode is missing its credentials.
 
@@ -177,8 +193,11 @@ sidebar.
 * A Save button that persists the selections to a JSON file at
   `~/.tradingagents/app/settings.json` via an atomic write (temp +
   rename).
+* Empty-string credential fields on update MUST mean "keep the stored
+  value", so an operator can edit non-secret fields without re-entering
+  the private key on every save.
 * The runner subprocess MUST inherit credentials from the saved
-  settings file, not from the dashboard process's own `os.environ`.
+  settings file, not from the FastAPI worker's own `os.environ`.
   Inherited Gonka environment variables MUST be cleared on the
   subprocess environment before applying the chosen mode's
   credentials, to prevent silent mode confusion.

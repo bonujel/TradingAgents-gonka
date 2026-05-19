@@ -58,7 +58,8 @@ python -m app.runner NVDA
 | 跑默认 top-20 S&P 500      | `python -m app.runner -j 4`                   |
 | 跑指定 ticker              | `python -m app.runner -j 4 NVDA AAPL ...`     |
 | 启动调度器(前台进程)     | `python -m app.scheduler`                     |
-| 启动看板(默认 `:8501`)   | `streamlit run app/dashboard.py`              |
+| 启动后端 API(`:8000`)    | `uvicorn app.api:app --reload --port 8000`    |
+| 启动前端(`:3000`)        | `cd frontend && npm install && npm run dev`   |
 
 ## 6. 数据库
 

@@ -237,14 +237,15 @@ python -m app.runner
 # 手动指定并发和 ticker
 python -m app.runner -j 4 NVDA AAPL MSFT GOOGL
 
-# 看板
-streamlit run app/dashboard.py
+# 看板(两进程:后端 + 前端)
+uvicorn app.api:app --port 8000
+cd frontend && npm install && npm run dev
 ```
 
 看板地址:
 
 ```text
-http://localhost:8501
+http://localhost:3000
 ```
 
 SQLite 默认位置:

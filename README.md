@@ -301,15 +301,23 @@ python -m app.scheduler                    # weekdays 16:30 America/New_York
 Tune the schedule, ticker universe, and SQLite path via
 `TRADINGAGENTS_APP_*` and `SP500_TICKERS` env vars (see `.env.example`).
 
-### Dashboard
+### Dashboard (FastAPI backend + Nuxt frontend)
+
+The operator console is split into two processes:
 
 ```bash
-streamlit run app/dashboard.py
+# Backend (default :8000)
+uvicorn app.api:app --reload --port 8000
+
+# Frontend (default :3000)
+cd frontend && npm install && npm run dev
 ```
 
-The dashboard lists every (ticker, trade date) decision row, exposes the
-Portfolio Manager verdict, trader plan, debate transcript, and the four
-analyst reports, and offers an in-page "run now" button for ad-hoc analyses.
+Open <http://127.0.0.1:3000>. The Decisions page lists every
+(ticker, trade date) row with the Portfolio Manager verdict, trader plan,
+debate transcript, and analyst reports; the Tasks page launches and
+monitors ad-hoc runs; the Settings page swaps Router / SDK credentials
+without restarting the backend.
 
 ### Pointing at a different model via Gonka
 

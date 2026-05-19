@@ -171,18 +171,45 @@ Exit code is `0` when all tickers succeed, `1` otherwise.
 Foreground scheduler; trap SIGINT/SIGTERM. No flags. All configuration
 via the environment variables in §4.4.
 
-### 6.3 `streamlit run app/dashboard.py`
+### 6.3 Operator console (FastAPI + Nuxt)
 
-Standard Streamlit invocation. For headless deployment (no browser
-auto-open):
+The dashboard is split into two processes since `gonka-tradeagents-kimi/v1-nfrontend`:
+a FastAPI backend (`app.api:app`) and a Nuxt 3 frontend in `frontend/`.
 
 ```bash
-streamlit run app/dashboard.py \
-  --server.address 0.0.0.0 \
-  --server.port 8501 \
-  --server.headless true \
-  --browser.gatherUsageStats false
+# Backend (default :8000). Run with a single worker so the in-memory
+# subprocess registry stays consistent.
+uvicorn app.api:app --host 0.0.0.0 --port 8000
+
+# Frontend (default :3000). Honors NUXT_PUBLIC_API_BASE for cross-host
+# deployments.
+cd frontend && npm install && npm run dev
 ```
+
+For production:
+
+```bash
+uvicorn app.api:app --host 0.0.0.0 --port 8000 --workers 1
+cd frontend && npm run build && node .output/server/index.mjs
+```
+
+Endpoints:
+
+| Path | Verb | Purpose |
+| ---- | ---- | ------- |
+| `/api/health` | GET | Liveness probe. |
+| `/api/info` | GET | Mode + default model + worker count + DB path. |
+| `/api/settings` | GET / PUT | Credentials, models, max_workers; secrets returned as redacted previews. |
+| `/api/decisions/dates` | GET | Distinct trade dates persisted. |
+| `/api/decisions` | GET | List rows filtered by date / ticker. |
+| `/api/decisions/{ticker}/{trade_date}` | GET | Single row with full reports. |
+| `/api/runs/active` | GET | Active subprocess registry (with elapsed time). |
+| `/api/runs` | POST | Launch a new run. |
+| `/api/runs/{pid}` | DELETE | `killpg(SIGTERM)` the runner's process group. |
+| `/api/runs/{pid}/log` | GET | Tail the run's log file. |
+| `/api/runs/recent` | GET | Recent rows from `run_log`. |
+| `/api/tickers/top` | GET | Top-N S&P 500 default. |
+| `/api/tickers/sp500` | GET | Full S&P 500 (Wikipedia-cached). |
 
 ## 7. Example configurations
 
@@ -223,5 +250,5 @@ SP500_TICKERS=NVDA,AAPL,MSFT,GOOGL,AMZN python -m app.runner -j 4
 | `HTTP 524` from `api.gonkascan.com` | Streaming disabled, Cloudflare upstream timeout fired | Ensure `streaming` is not overridden to `False`; switch from Kimi to Qwen3. |
 | `403 Transfer Agent not allowed` (SDK path) | `transfer_address` is your own derived address, not the gateway's | Unset `GONKA_ENDPOINTS`; let the client discover via `/v1/identity`. |
 | `messages[i].content must not be empty` | Stale client without the streaming compat fix | Update to a commit at or after `85b1ccd`. |
-| Dashboard Tasks page shows finished run as still active | Stale dashboard process holds an un-`wait()`-ed zombie | Restart `streamlit run`. The Tasks page is now zombie-aware and will not regress, but a stale process from before the fix may have leaked entries. |
+| Dashboard Tasks page shows finished run as still active | Stale FastAPI worker holds an un-`wait()`-ed zombie, or the API was restarted while a run was in flight | The backend reaps via `Popen.poll()` for handles it owns and falls back to `ps -p PID -o stat=` after a restart; if neither has caught up, restart the uvicorn worker. |
 | `do_request_failed` (HTTP 500) intermittently on router | `new-api` gateway upstream flake | Retry; if persistent, try a different model. Custom `extra_body` fields trigger this deterministically and should not be set on the router path. |
