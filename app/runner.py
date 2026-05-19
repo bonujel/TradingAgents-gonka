@@ -17,6 +17,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Iterable, Optional
 
+import httpx
+from openai import APIConnectionError, APIError, InternalServerError, RateLimitError
+
 from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -26,6 +29,115 @@ from .sp500 import get_top_tickers
 
 
 logger = logging.getLogger(__name__)
+
+
+# --- Retry policy -----------------------------------------------------------
+#
+# The 2026-05-15 S&P 500 batch (see dev_notes/sp500-run-2026-05-15.md) showed
+# 40% failure rate, with ~80% of failures attributable to transient router-side
+# issues (peer closed connections, 502 Bad Gateway) and another ~14% to a
+# Gonka chain executor bug (winner inference incomplete / nonce_finished=false).
+# All of these are safe to retry: the failed request produced no committed
+# server state, and a fresh attempt may land on a different upstream node or
+# miss the next router blip.
+#
+# The whitelist below errs on the side of *not* retrying anything that smells
+# like a code bug or a malformed request — failing fast there is more useful
+# than burning budget hiding real problems.
+
+_RETRYABLE_EXC: tuple[type[BaseException], ...] = (
+    httpx.RemoteProtocolError,    # peer closed connection mid-stream (router/CDN)
+    APIConnectionError,           # client-to-router TCP/socket failure
+    InternalServerError,          # 5xx upstream (e.g. nginx 502 Bad Gateway)
+    RateLimitError,               # 429 — backoff already widens, so retry is fine
+)
+
+# Bare openai.APIError is a catch-all: Gonka raises it for chain executor
+# failures with a plain-text message. We only retry the specific markers we
+# recognise so that future, genuinely-fatal APIError variants aren't masked.
+_RETRYABLE_API_ERROR_MARKERS: tuple[str, ...] = (
+    "nonce_finished=false",
+    "winner inference incomplete",
+)
+
+# Stream-level transient marker: an empty stream is almost always the tail of
+# an upstream disconnect that didn't surface as RemoteProtocolError.
+_RETRYABLE_VALUE_ERROR_MARKERS: tuple[str, ...] = (
+    "No generations found in stream",
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Decide whether ``exc`` represents a transient upstream failure.
+
+    Retried (whitelist):
+      - ``httpx.RemoteProtocolError``     — peer closed chunked stream
+      - ``openai.APIConnectionError``     — client TCP/socket error
+      - ``openai.InternalServerError``    — 5xx upstream
+      - ``openai.RateLimitError``         — 429 (paired with longer backoff)
+      - bare ``openai.APIError`` whose message matches a Gonka chain marker
+      - ``ValueError`` whose message matches a known empty-stream marker
+
+    Not retried (intentional):
+      - ``GraphRecursionError``           — LangGraph didn't converge, retry
+                                            still hits the 100-step cap
+      - ``openai.BadRequestError`` / ``AuthenticationError`` / etc. — the
+        request itself is wrong; retrying doesn't change the outcome
+      - any other ``ValueError`` / ``KeyError`` / ``TypeError`` — code bug
+    """
+    if isinstance(exc, _RETRYABLE_EXC):
+        return True
+    # Strict type check (not isinstance): only the bare APIError base class
+    # carries Gonka's chain-level errors. APIStatusError subclasses
+    # (BadRequestError, AuthenticationError, ...) inherit from APIError but
+    # are intentionally excluded — their failure mode is not transient.
+    if type(exc) is APIError:
+        msg = str(exc)
+        if any(m in msg for m in _RETRYABLE_API_ERROR_MARKERS):
+            return True
+    if isinstance(exc, ValueError):
+        msg = str(exc)
+        if any(m in msg for m in _RETRYABLE_VALUE_ERROR_MARKERS):
+            return True
+    return False
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r — using %d", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r — using %.1f", name, raw, default)
+        return default
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with a hard cap.
+
+    ``attempt`` is 1-indexed: 1 = first retry (i.e. first sleep), 2 = second
+    retry, etc. Defaults give 5s → 15s → 45s, which is wide enough to clear
+    the typical router-blip cluster (failures arrive in 1-minute bursts of
+    4–6 tickers per the May-15 data). Caller can tune via env vars:
+
+      TRADINGAGENTS_APP_RETRY_BACKOFF      first sleep, in seconds (default 5)
+      TRADINGAGENTS_APP_RETRY_BACKOFF_MAX  cap per sleep, in seconds (default 60)
+    """
+    base = _env_float("TRADINGAGENTS_APP_RETRY_BACKOFF", 5.0)
+    cap = _env_float("TRADINGAGENTS_APP_RETRY_BACKOFF_MAX", 60.0)
+    return min(base * (3 ** (attempt - 1)), cap)
 
 
 def _build_config() -> dict:
@@ -77,51 +189,108 @@ def run_one(
     trade_date: str,
     *,
     graph: Optional[TradingAgentsGraph] = None,
+    max_retries: Optional[int] = None,
 ) -> dict:
     """Run the agent graph for one ticker and persist the result.
+
+    On a retryable failure (see ``_is_retryable``), we sleep with exponential
+    backoff and try again, up to ``max_retries`` extra attempts (default 3
+    via env ``TRADINGAGENTS_APP_MAX_RETRIES``). Each retry builds a *fresh*
+    ``TradingAgentsGraph`` because the graph object accumulates per-ticker
+    state on ``self.curr_state`` / ``self.log_states_dict`` during
+    ``propagate()``; reusing a dirtied graph would carry partial-state
+    side effects into the next attempt and defeat the point of retrying.
+
+    Only the final exception is persisted to the DB, prefixed with
+    ``[retries=N]`` so dashboard scans can see at a glance how hard the row
+    was tried. The (ticker, trade_date) row is UPSERT'd so a later successful
+    retry overwrites any earlier failure row from the same call.
 
     Returns a small dict describing the outcome so the caller can summarise
     the batch without re-querying the DB.
     """
     config = _build_config()
-    logger.info(
-        "Starting %s on %s via %s/%s",
-        ticker, trade_date, config.get("llm_provider"), config.get("deep_think_llm"),
-    )
-    ta = graph or TradingAgentsGraph(debug=False, config=config)
+    if max_retries is None:
+        max_retries = _env_int("TRADINGAGENTS_APP_MAX_RETRIES", 3)
+    total_attempts = 1 + max_retries
 
-    try:
-        logger.info("[%s] entering propagate (multi-agent debate + tools)", ticker)
-        final_state, _signal = ta.propagate(ticker, trade_date)
-        logger.info("[%s] propagate complete", ticker)
-        final_decision = final_state.get("final_trade_decision") or ""
-        rating = parse_rating(final_decision) if final_decision else None
-        db.upsert_decision(
-            ticker=ticker,
-            trade_date=trade_date,
-            rating=rating,
-            final_decision=final_decision,
-            reports=_extract_reports(final_state),
-            model_provider=config.get("llm_provider"),
-            deep_model=config.get("deep_think_llm"),
-            quick_model=config.get("quick_think_llm"),
-        )
-        return {"ticker": ticker, "ok": True, "rating": rating}
-    except Exception as exc:
-        tb = traceback.format_exc(limit=4)
-        logger.exception("Run failed for %s on %s", ticker, trade_date)
-        db.upsert_decision(
-            ticker=ticker,
-            trade_date=trade_date,
-            rating=None,
-            final_decision=None,
-            reports={},
-            model_provider=config.get("llm_provider"),
-            deep_model=config.get("deep_think_llm"),
-            quick_model=config.get("quick_think_llm"),
-            error=f"{type(exc).__name__}: {exc}\n{tb}",
-        )
-        return {"ticker": ticker, "ok": False, "error": str(exc)}
+    logger.info(
+        "Starting %s on %s via %s/%s (max_retries=%d)",
+        ticker, trade_date, config.get("llm_provider"),
+        config.get("deep_think_llm"), max_retries,
+    )
+
+    last_exc: Optional[BaseException] = None
+    last_tb: str = ""
+    attempt = 0
+
+    for attempt in range(total_attempts):
+        # Honour a caller-supplied graph only on the very first attempt; every
+        # retry builds its own clean graph (see docstring for the rationale).
+        ta = graph if (attempt == 0 and graph is not None) \
+            else TradingAgentsGraph(debug=False, config=config)
+
+        try:
+            if attempt == 0:
+                logger.info("[%s] entering propagate (multi-agent debate + tools)", ticker)
+            else:
+                logger.info(
+                    "[%s] retry %d/%d (fresh graph)", ticker, attempt, max_retries,
+                )
+            final_state, _signal = ta.propagate(ticker, trade_date)
+            logger.info("[%s] propagate complete on attempt %d", ticker, attempt + 1)
+            final_decision = final_state.get("final_trade_decision") or ""
+            rating = parse_rating(final_decision) if final_decision else None
+            db.upsert_decision(
+                ticker=ticker,
+                trade_date=trade_date,
+                rating=rating,
+                final_decision=final_decision,
+                reports=_extract_reports(final_state),
+                model_provider=config.get("llm_provider"),
+                deep_model=config.get("deep_think_llm"),
+                quick_model=config.get("quick_think_llm"),
+            )
+            return {"ticker": ticker, "ok": True, "rating": rating, "retries": attempt}
+        except Exception as exc:
+            # Capture traceback inside the except block — sys.exc_info() is
+            # only populated here, and we need the text below the loop.
+            last_exc = exc
+            last_tb = traceback.format_exc(limit=4)
+            retryable = _is_retryable(exc)
+            if retryable and attempt < max_retries:
+                delay = _backoff_seconds(attempt + 1)
+                logger.warning(
+                    "[%s] attempt %d/%d failed (%s: %s); sleeping %.1fs before retry",
+                    ticker, attempt + 1, total_attempts,
+                    type(exc).__name__, exc, delay,
+                )
+                time.sleep(delay)
+                continue
+            # Non-retryable or out of retries — fall through to persist failure.
+            break
+
+    # All attempts exhausted (or hit a non-retryable exception).
+    assert last_exc is not None  # loop must have entered the except branch
+    logger.exception(
+        "Run failed for %s on %s after %d attempt(s)",
+        ticker, trade_date, attempt + 1,
+    )
+    error_msg = (
+        f"[retries={attempt}] {type(last_exc).__name__}: {last_exc}\n{last_tb}"
+    )
+    db.upsert_decision(
+        ticker=ticker,
+        trade_date=trade_date,
+        rating=None,
+        final_decision=None,
+        reports={},
+        model_provider=config.get("llm_provider"),
+        deep_model=config.get("deep_think_llm"),
+        quick_model=config.get("quick_think_llm"),
+        error=error_msg,
+    )
+    return {"ticker": ticker, "ok": False, "error": str(last_exc), "retries": attempt}
 
 
 def _env_max_workers(default: int = 1) -> int:
