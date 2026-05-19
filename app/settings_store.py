@@ -59,8 +59,15 @@ def save_settings(settings: dict[str, Any]) -> None:
 
 def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
+    # Set unwanted Gonka credentials to "" rather than pop()'ing them.
+    # tradingagents/__init__.py calls load_dotenv(override=False) at import
+    # time, which resurrects any *unset* variable from the project .env file.
+    # Popping → variable is unset → dotenv re-loads it from .env → router
+    # mode subprocesses silently inherit SDK credentials. Setting to "" keeps
+    # the slot occupied so override=False sees it and skips, and downstream
+    # callers (gonka_client._sdk_private_key etc.) treat "" as falsy.
     for key in ("GONKA_API_KEY", "GONKA_PRIVATE_KEY", "GONKA_SOURCE_URL"):
-        env.pop(key, None)
+        env[key] = ""
     if settings["mode"] == "router" and settings.get("router_api_key"):
         env["GONKA_API_KEY"] = settings["router_api_key"]
     elif settings["mode"] == "sdk":
