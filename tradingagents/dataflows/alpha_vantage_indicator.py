@@ -1,4 +1,5 @@
 from .alpha_vantage_common import _make_api_request
+from .utils import safe_strptime
 
 def get_indicator(
     symbol: str,
@@ -62,7 +63,7 @@ def get_indicator(
             f"Indicator {indicator} is not supported. Please choose from: {list(supported_indicators.keys())}"
         )
 
-    curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_date_dt = safe_strptime(curr_date)
     before = curr_date_dt - relativedelta(days=look_back_days)
 
     # Get the full data for the period instead of making individual calls

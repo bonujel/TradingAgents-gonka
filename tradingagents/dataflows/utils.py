@@ -61,10 +61,76 @@ def decorate_all_methods(decorator):
     return class_decorator
 
 
+_DATE_PATTERN = re.compile(r"^(\d{1,4})-(\d{1,2})-(\d{1,2})$")
+
+
+def normalize_date(date_str) -> str | None:
+    """Coerce a possibly-garbled date string into canonical YYYY-MM-DD.
+
+    LLM tool-call arguments are not always clean: in the 2026-05-19 batch
+    the model produced things like ``'226-05-15'`` (year truncated to 3
+    digits), ``'20 20-04-01'`` (whitespace inserted), or ``'22'`` (just
+    junk). Bare ``datetime.strptime`` raises ``ValueError`` and bubbles
+    out of the LangGraph node, killing the whole ticker run.
+
+    Strategy (each step is cheap; we bail at the first that succeeds):
+      1. Strip all whitespace (fixes ``'20 20-04-01'`` and ``'20 -005-14'``
+         when the latter happens to land on a valid date after stripping).
+      2. Try strict parse.
+      3. If the string still looks like ``Y-M-D`` but the year is < 4
+         digits, pad to 4 digits assuming the 21st century:
+         ``'226'`` → ``'2026'``, ``'26'`` → ``'2026'``.
+      4. Re-parse the padded form; ``datetime(Y, M, D)`` rejects illegal
+         month/day combinations so ``'206-0-19'`` (month 0) returns None.
+
+    Returns canonical ``YYYY-MM-DD`` on success, ``None`` when the string
+    is too far gone to salvage. Callers decide how to handle ``None`` —
+    typically by returning an error string the LLM can read and retry from.
+    """
+    if not date_str:
+        return None
+    cleaned = re.sub(r"\s+", "", str(date_str))
+    try:
+        return datetime.strptime(cleaned, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    m = _DATE_PATTERN.match(cleaned)
+    if not m:
+        return None
+    y_raw, mo, d = m.groups()
+    y_int = int(y_raw)
+    if y_int < 100:
+        y_int += 2000        # '26' → 2026
+    elif y_int < 1000:
+        y_int = 2000 + (y_int % 100)  # '226' → 2026
+    try:
+        return datetime(y_int, int(mo), int(d)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def safe_strptime(date_str, *, fmt: str = "%Y-%m-%d") -> datetime:
+    """Drop-in replacement for ``datetime.strptime(date_str, "%Y-%m-%d")``
+    that recovers from common LLM date garbling via ``normalize_date``.
+
+    Raises ``ValueError`` with the *original* input in the message when
+    the string is unrecoverable, so callers' existing ``except ValueError``
+    handlers keep working.
+    """
+    if fmt != "%Y-%m-%d":
+        return datetime.strptime(date_str, fmt)
+    normalized = normalize_date(date_str)
+    if normalized is None:
+        raise ValueError(
+            f"time data {date_str!r} does not match format '%Y-%m-%d'"
+        )
+    return datetime.strptime(normalized, fmt)
+
+
 def get_next_weekday(date):
 
     if not isinstance(date, datetime):
-        date = datetime.strptime(date, "%Y-%m-%d")
+        date = safe_strptime(date)
 
     if date.weekday() >= 5:
         days_to_add = 7 - date.weekday()

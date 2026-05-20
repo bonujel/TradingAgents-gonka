@@ -5,6 +5,7 @@ import pandas as pd
 import yfinance as yf
 import os
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
+from .utils import safe_strptime
 
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -12,8 +13,8 @@ def get_YFin_data_online(
     end_date: Annotated[str, "End date in yyyy-mm-dd format"],
 ):
 
-    datetime.strptime(start_date, "%Y-%m-%d")
-    datetime.strptime(end_date, "%Y-%m-%d")
+    safe_strptime(start_date)
+    safe_strptime(end_date)
 
     # Create ticker object
     ticker = yf.Ticker(symbol.upper())
@@ -135,7 +136,7 @@ def get_stock_stats_indicators_window(
         )
 
     end_date = curr_date
-    curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_date_dt = safe_strptime(curr_date)
     before = curr_date_dt - relativedelta(days=look_back_days)
 
     # Optimized: Get stock data once and calculate indicators for all dates
@@ -167,7 +168,7 @@ def get_stock_stats_indicators_window(
         print(f"Error getting bulk stockstats data: {e}")
         # Fallback to original implementation if bulk method fails
         ind_string = ""
-        curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+        curr_date_dt = safe_strptime(curr_date)
         while curr_date_dt >= before:
             indicator_value = get_stockstats_indicator(
                 symbol, indicator, curr_date_dt.strftime("%Y-%m-%d")
@@ -227,7 +228,7 @@ def get_stockstats_indicator(
     ],
 ) -> str:
 
-    curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_date_dt = safe_strptime(curr_date)
     curr_date = curr_date_dt.strftime("%Y-%m-%d")
 
     try:

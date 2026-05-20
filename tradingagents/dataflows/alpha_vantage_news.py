@@ -1,4 +1,5 @@
 from .alpha_vantage_common import _make_api_request, format_datetime_for_api
+from .utils import safe_strptime
 
 def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
     """Returns live and historical market news & sentiment data from premier news outlets worldwide.
@@ -38,7 +39,7 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     from datetime import datetime, timedelta
 
     # Calculate start date
-    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_dt = safe_strptime(curr_date)
     start_dt = curr_dt - timedelta(days=look_back_days)
     start_date = start_dt.strftime("%Y-%m-%d")
 
