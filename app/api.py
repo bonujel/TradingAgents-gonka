@@ -31,7 +31,7 @@ from .settings_store import (
     public_view,
     save_settings,
 )
-from .sp500 import get_sp500_tickers, get_top_tickers
+from .sp500 import get_sp100_tickers, get_sp500_tickers, get_top_tickers
 
 
 logger = logging.getLogger(__name__)
@@ -206,6 +206,8 @@ def start_run(req: RunRequest) -> dict[str, Any]:
             workers=req.workers,
             kind=req.kind,
         )
+    except tasks.RecentDuplicateLaunch as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except tasks.CapacityExceeded as exc:
         # 409 Conflict — the request was valid but the system is at the
         # per-kind cap. Frontend uses this to disable the Run button.
@@ -275,6 +277,11 @@ def list_recent_runs(limit: int = Query(default=10, ge=1, le=200)) -> list[dict[
 @app.get("/api/tickers/top")
 def tickers_top(n: int = Query(default=20, ge=1, le=500)) -> list[str]:
     return get_top_tickers(n)
+
+
+@app.get("/api/tickers/sp100")
+def tickers_sp100() -> list[str]:
+    return get_sp100_tickers()
 
 
 @app.get("/api/tickers/sp500")

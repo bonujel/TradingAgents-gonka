@@ -242,3 +242,39 @@ def test_dedup_window_seconds_default():
 def test_dedup_window_seconds_env_override(monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_APP_DEDUP_WINDOW_SECONDS", "30")
     assert _dedup_window_seconds() == 30
+
+
+def test_api_returns_409_on_recent_duplicate(monkeypatch):
+    """Hitting POST /api/runs when a recent launch exists → 409."""
+    from fastapi.testclient import TestClient
+
+    from app.api import app
+    from app import tasks as tasks_mod
+    from app import api as api_mod
+
+    monkeypatch.setattr(
+        api_mod,
+        "load_settings",
+        lambda: {
+            "mode": "router",
+            "router_api_key": "sk-test",
+            "sdk_private_key": "",
+            "sdk_source_url": "",
+            "deep_model": "Qwen/Qwen3",
+            "quick_model": "Qwen/Qwen3",
+            "max_workers": 4,
+        },
+    )
+
+    def fake_start_run(**kwargs):
+        raise tasks_mod.RecentDuplicateLaunch(gap_seconds=3.0, window=15)
+
+    monkeypatch.setattr(tasks_mod, "start_run", fake_start_run)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/runs",
+        json={"tickers": ["NVDA"], "workers": 4, "kind": "manual"},
+    )
+    assert resp.status_code == 409
+    assert "3.0s ago" in resp.json()["detail"]
