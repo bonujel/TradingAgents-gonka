@@ -215,51 +215,60 @@ def _save_index(tasks: list[dict[str, Any]]) -> None:
     tmp.replace(_ACTIVE_TASKS_PATH)
 
 
-def _pid_state_via_ps(pid: int) -> Optional[bool]:
-    """Linux + macOS-compatible probe; ``None`` on unexpected errors."""
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "stat="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return False
-    state = result.stdout.strip()
-    if not state:
-        return False
-    return not state.startswith("Z")
-
-
-def _is_alive(pid: int) -> bool:
-    """Authoritative liveness: poll the handle when we have one, else ps."""
-    with _PROC_LOCK:
-        proc = _PROC_HANDLES.get(pid)
-    if proc is not None:
-        return proc.poll() is None
-    via_ps = _pid_state_via_ps(pid)
-    return bool(via_ps) if via_ps is not None else False
-
-
-def _prune(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    alive: list[dict[str, Any]] = []
-    with _PROC_LOCK:
-        for task in tasks:
-            if _is_alive(task["pid"]):
-                alive.append(task)
-            else:
-                _PROC_HANDLES.pop(task["pid"], None)
-    return alive
-
-
 def list_active() -> list[dict[str, Any]]:
-    """Return the live set, with any zombie entries pruned and persisted."""
-    tasks = _prune(_load_index())
-    _save_index(tasks)
-    return tasks
+    """Reconcile OS process state with the on-disk metadata cache.
+
+    OS scan is the source of truth: every live runner subprocess
+    surfaces here, regardless of whether the uvicorn that started it is
+    still around. ``active_tasks.json`` provides extra metadata
+    (kind, log_path, mode, deep_model) — joined by PID.
+
+    Side effects:
+    * PIDs in JSON with no matching live process → dropped silently.
+    * PIDs in the OS scan with no JSON entry → emitted with
+      ``kind="orphan"`` and metadata reconstructed from the command line.
+    * The reconciled list is written back to JSON so concurrent readers
+      don't re-do the scan, and so the cache stays roughly fresh.
+    """
+    scan_rows = _scan_runner_processes()
+    metadata_by_pid = {t["pid"]: t for t in _load_index()}
+
+    reconciled: list[dict[str, Any]] = []
+    for row in scan_rows:
+        pid = row["pid"]
+        meta = metadata_by_pid.get(pid)
+        if meta is not None:
+            # Prefer JSON's started_at (more precise — recorded at spawn,
+            # not derived from ``etime`` rounding) but trust the scan for
+            # liveness. Fill any gaps with scan data.
+            reconciled.append({
+                **meta,
+                "tickers": meta.get("tickers") or row["tickers"],
+                "workers": meta.get("workers") or row["workers"],
+            })
+        else:
+            reconciled.append({
+                "pid": pid,
+                "kind": "orphan",
+                "started_at": row["started_at"],
+                "tickers": row["tickers"],
+                "workers": row["workers"],
+                "log_path": None,
+                "mode": None,
+                "deep_model": None,
+            })
+
+    # Persist the reconciled state. Acquire the lock so concurrent
+    # start_run calls don't observe a half-written file.
+    with _PROC_LOCK:
+        _save_index(reconciled)
+        # Drop _PROC_HANDLES entries for PIDs no longer in the scan —
+        # the subprocess is gone so the handle is useless.
+        live_pids = {r["pid"] for r in reconciled}
+        for stale_pid in [p for p in _PROC_HANDLES if p not in live_pids]:
+            _PROC_HANDLES.pop(stale_pid, None)
+
+    return reconciled
 
 
 def count_active_by_kind() -> dict[str, int]:
@@ -334,7 +343,7 @@ def start_run(
             "mode": settings["mode"],
             "deep_model": settings.get("deep_model"),
         }
-        tasks_now = _prune(_load_index())
+        tasks_now = list_active()
         tasks_now.append(task)
         _save_index(tasks_now)
         return task

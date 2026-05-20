@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -9,6 +12,7 @@ from app.tasks import (
     _parse_etime,
     _parse_runner_cmdline,
     _scan_runner_processes,
+    list_active,
 )
 
 
@@ -119,3 +123,63 @@ def test_scan_runner_processes_computes_started_at_iso():
 def test_scan_runner_processes_returns_empty_on_ps_failure():
     with patch("app.tasks._run_ps_scan", return_value=None):
         assert _scan_runner_processes() == []
+
+
+@pytest.fixture
+def tmp_active_tasks_path(tmp_path, monkeypatch):
+    """Point the module's active_tasks.json at a per-test temp file."""
+    fake_path = tmp_path / "active_tasks.json"
+    monkeypatch.setattr("app.tasks._ACTIVE_TASKS_PATH", fake_path)
+    return fake_path
+
+
+def test_list_active_returns_known_kind_when_pid_in_json(tmp_active_tasks_path):
+    fake_scan = [{
+        "pid": 100, "started_at": "2026-05-20T11:00:00",
+        "tickers": ["NVDA"], "workers": 8,
+    }]
+    tmp_active_tasks_path.write_text(json.dumps([{
+        "pid": 100,
+        "kind": "manual",
+        "started_at": "2026-05-20T11:00:00",
+        "tickers": ["NVDA"],
+        "workers": 8,
+        "log_path": "/tmp/run.log",
+        "mode": "router",
+        "deep_model": "Qwen/Qwen3",
+    }]))
+    with patch("app.tasks._scan_runner_processes", return_value=fake_scan):
+        active = list_active()
+    assert len(active) == 1
+    assert active[0]["kind"] == "manual"
+    assert active[0]["deep_model"] == "Qwen/Qwen3"
+
+
+def test_list_active_marks_unknown_pids_as_orphan(tmp_active_tasks_path):
+    """OS sees a runner; JSON has no metadata → orphan entry."""
+    fake_scan = [{
+        "pid": 200, "started_at": "2026-05-20T11:00:00",
+        "tickers": ["MSFT", "AAPL"], "workers": 4,
+    }]
+    tmp_active_tasks_path.write_text("[]")
+    with patch("app.tasks._scan_runner_processes", return_value=fake_scan):
+        active = list_active()
+    assert len(active) == 1
+    assert active[0]["kind"] == "orphan"
+    assert active[0]["tickers"] == ["MSFT", "AAPL"]
+    assert active[0]["workers"] == 4
+    assert active[0]["deep_model"] is None
+
+
+def test_list_active_drops_json_entries_with_no_live_pid(tmp_active_tasks_path):
+    """JSON has stale entry; OS scan empty → that entry is dropped."""
+    tmp_active_tasks_path.write_text(json.dumps([{
+        "pid": 999, "kind": "manual", "started_at": "2026-05-20T10:00:00",
+        "tickers": ["X"], "workers": 1, "log_path": "/tmp/x.log",
+        "mode": "router", "deep_model": "Q",
+    }]))
+    with patch("app.tasks._scan_runner_processes", return_value=[]):
+        active = list_active()
+    assert active == []
+    # Reconciled state was persisted back
+    assert json.loads(tmp_active_tasks_path.read_text()) == []
