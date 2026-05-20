@@ -178,8 +178,12 @@ _PROC_HANDLES: dict[int, subprocess.Popen] = {}
 
 # Concurrency caps. Manual runs and scheduled runs are tracked as
 # separate kinds so the scheduler can always claim its single slot even
-# while the operator is launching ad-hoc batches.
-MAX_PER_KIND = {"manual": 2, "scheduled": 1}
+# while the operator is launching ad-hoc batches. As of 2026-05-20 both
+# are capped at 1: parallel manual runs caused duplicate-launch incidents
+# (see dev_notes/runner-registry-fix-design.md). Operators who want
+# parallel A/B testing should wait for the first to finish or bump this
+# constant in a hotfix.
+MAX_PER_KIND = {"manual": 1, "scheduled": 1}
 KINDS = tuple(MAX_PER_KIND.keys())
 
 

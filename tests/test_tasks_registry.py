@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from app.tasks import (
+    MAX_PER_KIND,
     _parse_etime,
     _parse_runner_cmdline,
     _scan_runner_processes,
@@ -169,6 +170,14 @@ def test_list_active_marks_unknown_pids_as_orphan(tmp_active_tasks_path):
     assert active[0]["tickers"] == ["MSFT", "AAPL"]
     assert active[0]["workers"] == 4
     assert active[0]["deep_model"] is None
+
+
+def test_max_per_kind_caps_manual_at_one():
+    assert MAX_PER_KIND["manual"] == 1
+
+
+def test_max_per_kind_caps_scheduled_at_one():
+    assert MAX_PER_KIND["scheduled"] == 1
 
 
 def test_list_active_drops_json_entries_with_no_live_pid(tmp_active_tasks_path):
