@@ -10,12 +10,14 @@
         :class="
           task.kind === 'scheduled'
             ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-200'
-            : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+            : task.kind === 'orphan'
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+              : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
         "
       >
-        {{ task.kind || "manual" }}
+        {{ task.kind === "orphan" ? "auto-detected" : task.kind || "manual" }}
       </span>
-      <span class="chip">{{ task.mode.toUpperCase() }}</span>
+      <span class="chip">{{ task.mode ? task.mode.toUpperCase() : "—" }}</span>
       <span class="chip font-mono">{{ shortModel }}</span>
       <span class="chip">{{ task.tickers.length }} tickers</span>
       <span class="chip">workers={{ task.workers }}</span>
