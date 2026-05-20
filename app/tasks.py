@@ -66,6 +66,40 @@ def _parse_runner_cmdline(cmd: str) -> tuple[list[str], Optional[int]]:
     return tickers, workers
 
 
+def _parse_etime(etime: str) -> "timedelta":
+    """Convert ``ps -o etime=`` output into a ``timedelta``.
+
+    Recognised forms (``man ps``):
+
+    * ``MM:SS``        — less than one hour
+    * ``HH:MM:SS``     — less than one day
+    * ``dd-HH:MM:SS``  — at least one day
+
+    Returns ``timedelta(0)`` for unparseable strings rather than raising,
+    so a single weird row from ``ps`` doesn't blow up the whole scan.
+    """
+    from datetime import timedelta
+    cleaned = etime.strip()
+    days = 0
+    if "-" in cleaned:
+        d_str, cleaned = cleaned.split("-", 1)
+        try:
+            days = int(d_str)
+        except ValueError:
+            return timedelta(0)
+    parts = cleaned.split(":")
+    try:
+        if len(parts) == 2:
+            m, s = int(parts[0]), int(parts[1])
+            return timedelta(days=days, minutes=m, seconds=s)
+        if len(parts) == 3:
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+            return timedelta(days=days, hours=h, minutes=m, seconds=s)
+    except ValueError:
+        return timedelta(0)
+    return timedelta(0)
+
+
 # Re-entrant: ``_prune`` holds the lock while iterating, and the helpers
 # it calls (``_is_alive``) also acquire the same lock to read the handle
 # dict. A plain ``Lock`` deadlocks the second acquire on the same thread.
