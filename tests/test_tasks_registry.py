@@ -10,6 +10,9 @@ from unittest.mock import patch
 
 from app.tasks import (
     MAX_PER_KIND,
+    RecentDuplicateLaunch,
+    _check_recent_launch,
+    _dedup_window_seconds,
     _parse_etime,
     _parse_runner_cmdline,
     _scan_runner_processes,
@@ -192,3 +195,50 @@ def test_list_active_drops_json_entries_with_no_live_pid(tmp_active_tasks_path):
     assert active == []
     # Reconciled state was persisted back
     assert json.loads(tmp_active_tasks_path.read_text()) == []
+
+
+def test_recent_duplicate_launch_carries_gap_and_window():
+    exc = RecentDuplicateLaunch(gap_seconds=3.2, window=15)
+    assert exc.gap_seconds == 3.2
+    assert exc.window == 15
+    assert "3.2s ago" in str(exc)
+    assert "11s" in str(exc) or "12s" in str(exc)  # 15 - 3.2 rounded
+
+
+def test_check_recent_launch_raises_when_inside_window():
+    active = [{
+        "pid": 1, "started_at": "2026-05-20T11:59:55", "kind": "manual",
+        "tickers": [], "workers": 1, "log_path": None,
+        "mode": None, "deep_model": None,
+    }]
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0)  # 5s after launch
+    with patch("app.tasks._utc_now_naive", return_value=fixed_now):
+        with pytest.raises(RecentDuplicateLaunch) as exc:
+            _check_recent_launch(active, window_seconds=15)
+    assert 4.5 < exc.value.gap_seconds < 5.5
+
+
+def test_check_recent_launch_allows_when_outside_window():
+    active = [{
+        "pid": 1, "started_at": "2026-05-20T11:00:00", "kind": "manual",
+        "tickers": [], "workers": 1, "log_path": None,
+        "mode": None, "deep_model": None,
+    }]
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0)  # 1 hour after
+    with patch("app.tasks._utc_now_naive", return_value=fixed_now):
+        _check_recent_launch(active, window_seconds=15)  # no raise
+
+
+def test_check_recent_launch_no_active_no_raise():
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0)
+    with patch("app.tasks._utc_now_naive", return_value=fixed_now):
+        _check_recent_launch([], window_seconds=15)
+
+
+def test_dedup_window_seconds_default():
+    assert _dedup_window_seconds() == 15
+
+
+def test_dedup_window_seconds_env_override(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_APP_DEDUP_WINDOW_SECONDS", "30")
+    assert _dedup_window_seconds() == 30

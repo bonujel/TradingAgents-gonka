@@ -199,6 +199,46 @@ class CapacityExceeded(RuntimeError):
         self.limit = limit
 
 
+class RecentDuplicateLaunch(RuntimeError):
+    """Raised by ``start_run`` when a launch arrives inside the debounce window.
+
+    Catches double-click / network-retry / cross-uvicorn race scenarios
+    that the per-kind capacity check can let through.
+    """
+
+    def __init__(self, gap_seconds: float, window: int) -> None:
+        remaining = max(0, window - gap_seconds)
+        super().__init__(
+            f"A run started {gap_seconds:.1f}s ago. "
+            f"Please wait {remaining:.0f}s before launching another."
+        )
+        self.gap_seconds = gap_seconds
+        self.window = window
+
+
+def _dedup_window_seconds() -> int:
+    """Read the debounce window from env each call so tests can monkeypatch."""
+    raw = os.environ.get("TRADINGAGENTS_APP_DEDUP_WINDOW_SECONDS")
+    if raw is None:
+        return 15
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 15
+
+
+def _check_recent_launch(active: list[dict[str, Any]], *, window_seconds: int) -> None:
+    """Raise ``RecentDuplicateLaunch`` if any active task started within window."""
+    if window_seconds <= 0:
+        return
+    now = _utc_now_naive()
+    for task in active:
+        started = datetime.fromisoformat(task["started_at"])
+        gap = (now - started).total_seconds()
+        if 0 <= gap < window_seconds:
+            raise RecentDuplicateLaunch(gap, window_seconds)
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
@@ -312,13 +352,18 @@ def start_run(
     if kind not in MAX_PER_KIND:
         raise ValueError(f"Unknown run kind: {kind!r}")
 
-    # Capacity check + launch happen under the same lock so two
-    # near-simultaneous POSTs can't both squeeze past the limit.
+    # Capacity check + debounce + launch happen under the same lock so
+    # two near-simultaneous POSTs can't both squeeze past the gates.
     with _PROC_LOCK:
-        counts = count_active_by_kind()
+        active = list_active()
+        counts = {k: 0 for k in KINDS}
+        for t in active:
+            tk = t.get("kind", "manual")
+            counts[tk] = counts.get(tk, 0) + 1
         limit = MAX_PER_KIND[kind]
         if counts.get(kind, 0) >= limit:
             raise CapacityExceeded(kind, counts.get(kind, 0), limit)
+        _check_recent_launch(active, window_seconds=_dedup_window_seconds())
 
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
         started = datetime.now(timezone.utc).replace(tzinfo=None)
