@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -29,6 +30,41 @@ _ACTIVE_TASKS_PATH = APP_HOME / "active_tasks.json"
 _LOG_DIR = APP_HOME / "logs"
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _parse_runner_cmdline(cmd: str) -> tuple[list[str], Optional[int]]:
+    """Extract (tickers, workers) from a ``python -m app.runner ...`` line.
+
+    Returns ``([], None)`` if the command line doesn't look like a runner
+    invocation. Recognises ``-j N`` and ``--workers N`` as the workers
+    flag; treats every other dash-prefixed token as an unknown flag to
+    skip (no value consumed unless we know about it).
+    """
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return [], None
+    if "app.runner" not in parts:
+        return [], None
+    i = parts.index("app.runner") + 1
+    workers: Optional[int] = None
+    tickers: list[str] = []
+    while i < len(parts):
+        token = parts[i]
+        if token in ("-j", "--workers") and i + 1 < len(parts):
+            try:
+                workers = int(parts[i + 1])
+            except ValueError:
+                pass
+            i += 2
+            continue
+        if token.startswith("-"):
+            i += 1
+            continue
+        tickers.append(token)
+        i += 1
+    return tickers, workers
+
 
 # Re-entrant: ``_prune`` holds the lock while iterating, and the helpers
 # it calls (``_is_alive``) also acquire the same lock to read the handle
