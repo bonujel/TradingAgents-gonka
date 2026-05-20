@@ -100,6 +100,76 @@ def _parse_etime(etime: str) -> "timedelta":
     return timedelta(0)
 
 
+def _utc_now_naive() -> datetime:
+    """Wrapper so tests can monkeypatch the clock."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _run_ps_scan() -> Optional[str]:
+    """Run ``ps -A -o pid,etime,stat,command`` and return stdout.
+
+    Wrapped in a tiny function so tests can patch a single seam without
+    monkeypatching ``subprocess.run`` globally. Returns ``None`` on any
+    failure so the caller can degrade to "no scan available".
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-A", "-o", "pid=,etime=,stat=,command="],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _scan_runner_processes() -> list[dict[str, Any]]:
+    """Return one dict per live runner subprocess.
+
+    Each dict has: ``pid: int``, ``started_at: str (ISO, UTC naive)``,
+    ``tickers: list[str]``, ``workers: Optional[int]``. Zombie processes
+    (``stat`` starts with ``Z``) are dropped because they don't actually
+    consume the slot anymore — only their PID does, and only briefly.
+
+    The OS-backed source of truth for liveness; everything else in this
+    module joins onto its output by PID.
+    """
+    raw = _run_ps_scan()
+    if not raw:
+        return []
+    now = _utc_now_naive()
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Format: "PID ETIME STAT COMMAND..."
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid_str, etime_str, stat, cmd = parts
+        if stat.startswith("Z"):
+            continue
+        if "app.runner" not in cmd:
+            continue
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        tickers, workers = _parse_runner_cmdline(cmd)
+        started_at = (now - _parse_etime(etime_str)).isoformat(timespec="seconds")
+        rows.append({
+            "pid": pid,
+            "started_at": started_at,
+            "tickers": tickers,
+            "workers": workers,
+        })
+    return rows
+
+
 # Re-entrant: ``_prune`` holds the lock while iterating, and the helpers
 # it calls (``_is_alive``) also acquire the same lock to read the handle
 # dict. A plain ``Lock`` deadlocks the second acquire on the same thread.

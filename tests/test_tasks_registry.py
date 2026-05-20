@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
-from app.tasks import _parse_etime, _parse_runner_cmdline
+from app.tasks import (
+    _parse_etime,
+    _parse_runner_cmdline,
+    _scan_runner_processes,
+)
 
 
 def test_parse_runner_cmdline_with_workers_and_tickers():
@@ -66,3 +71,51 @@ def test_parse_etime_with_leading_whitespace():
 
 def test_parse_etime_returns_zero_on_garbage():
     assert _parse_etime("not-a-time") == timedelta(0)
+
+
+def _fake_ps_output(rows: list[tuple[str, str, str, str]]) -> str:
+    """Build a fake `ps -A -o pid=,etime=,stat=,command=` block."""
+    return "\n".join(f"{pid} {etime} {stat} {cmd}" for pid, etime, stat, cmd in rows)
+
+
+def test_scan_runner_processes_filters_to_runners():
+    fake = _fake_ps_output([
+        ("100", "00:05", "S", "/usr/bin/python -m app.runner -j 8 NVDA"),
+        ("200", "10:00", "R", "/usr/bin/python -m app.scheduler"),
+        ("300", "01:00", "S", "/usr/bin/bash -c 'echo hi'"),
+    ])
+    with patch("app.tasks._run_ps_scan", return_value=fake):
+        rows = _scan_runner_processes()
+    assert len(rows) == 1
+    assert rows[0]["pid"] == 100
+    assert rows[0]["tickers"] == ["NVDA"]
+    assert rows[0]["workers"] == 8
+
+
+def test_scan_runner_processes_drops_zombies():
+    fake = _fake_ps_output([
+        ("100", "00:05", "S", "/usr/bin/python -m app.runner AAPL"),
+        ("101", "00:06", "Z+", "/usr/bin/python -m app.runner MSFT"),
+    ])
+    with patch("app.tasks._run_ps_scan", return_value=fake):
+        rows = _scan_runner_processes()
+    pids = [r["pid"] for r in rows]
+    assert 100 in pids
+    assert 101 not in pids
+
+
+def test_scan_runner_processes_computes_started_at_iso():
+    """etime=01:00 means the process has been alive 1 minute."""
+    fake = _fake_ps_output([
+        ("100", "01:00", "S", "/usr/bin/python -m app.runner NVDA"),
+    ])
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0)
+    with patch("app.tasks._run_ps_scan", return_value=fake), \
+         patch("app.tasks._utc_now_naive", return_value=fixed_now):
+        rows = _scan_runner_processes()
+    assert rows[0]["started_at"] == "2026-05-20T11:59:00"
+
+
+def test_scan_runner_processes_returns_empty_on_ps_failure():
+    with patch("app.tasks._run_ps_scan", return_value=None):
+        assert _scan_runner_processes() == []
