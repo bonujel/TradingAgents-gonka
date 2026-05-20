@@ -51,7 +51,9 @@ entry to be silently dropped from `active_tasks.json` with no recovery path.
 ## Non-goals
 
 * Cross-machine coordination (single-host only).
-* Replacing the existing scheduled-vs-manual `MAX_PER_KIND` cap.
+* Removing the kind-based `MAX_PER_KIND` model entirely. The scheduler
+  retains its dedicated slot; only the per-kind value changes (see
+  Section 2a).
 * Idempotency tokens / exactly-once semantics. The 15s time window is
   sufficient for the observed failure mode.
 
@@ -120,10 +122,40 @@ def _parse_runner_cmdline(cmd: str) -> tuple[list[str], int | None]:
 JSON from OS state. No explicit "recover orphans on startup" step needed —
 the existing read path is self-healing.
 
-### Section 2 — 15-second launch debounce
+### Section 2a — Per-kind cap tightened to 1
+
+**Change.** `MAX_PER_KIND = {"manual": 1, "scheduled": 1}` (was
+`{"manual": 2, "scheduled": 1}`).
+
+Effect: at most **one manual + one scheduled** can be active at the same
+time. Two manual launches in flight is now structurally impossible — the
+second one is rejected with the existing `CapacityExceeded` exception
+regardless of the time gap.
+
+The scheduler retains its dedicated slot. If a user-initiated manual run
+is happening at the 16:30 cron fire, the scheduler can still claim its
+own slot and run alongside; both will show up in the UI (each tagged with
+its `kind`). This matches the original design intent of giving the
+scheduler an independent reservation.
+
+### Section 2b — 15-second launch debounce
 
 **Location.** `app/tasks.py:start_run()`, after the capacity check, before
 spawn.
+
+**Why still needed even with manual=1.** Two failure scenarios survive
+the capacity tightening:
+* A manual run finishes; the user clicks Launch twice in quick succession
+  intending one launch — capacity check passes both times (zero active
+  manual at click 1 → spawn; zero active at click 2 because click 1's
+  registration hasn't propagated yet in the read-modify-write window).
+* Cross-kind double-fire: a stale scheduler trigger plus an immediate
+  manual click could both squeeze through if their capacity checks land
+  back-to-back. (Low probability, but no extra code needed once the
+  window is in place.)
+
+The 15s window catches both. With manual=1 it's belt-and-suspenders; cost
+is one extra check per launch.
 
 **Implementation.**
 
@@ -173,9 +205,15 @@ error envelope (`{"detail": "..."}`) is already what the frontend's
 
 Two changes in `frontend/`:
 
-1. **`ActiveRunRow.vue`** — render `kind="orphan"` with an amber badge
-   labelled exactly **`auto-detected`**. Existing `manual`/`scheduled`
-   badges stay unchanged.
+1. **`ActiveRunRow.vue`** — three distinct kind badges, all colour-coded
+   so the user can tell at a glance what's running:
+   * `manual` — neutral / slate badge (existing).
+   * `scheduled` — emerald / accent badge (existing).
+   * `orphan` — amber badge labelled exactly **`auto-detected`**.
+   The "Active runs" header already shows the total count
+   (`Active runs · {{ active.length }}`), which now counts all three
+   kinds together so the user sees "Active runs · 2" when a manual and
+   a scheduled are co-running.
 2. **No changes needed** for: 409 error toast (existing `errorMessage()`
    picks up `detail`), multi-row rendering (existing `v-for` over
    `active`), launch-button-while-launching guard (existing `:disabled`).
@@ -235,5 +273,9 @@ Two changes in `frontend/`:
 * `active_tasks.json` schema is **forward-compatible** — we only add
   `kind="orphan"` as a new enum value, existing entries are still parsed.
 * `start_run()` API signature unchanged.
-* `MAX_PER_KIND` cap unchanged (still `{manual: 2, scheduled: 1}`); the
-  15s window is a separate orthogonal gate.
+* `MAX_PER_KIND` tightened from `{manual: 2, scheduled: 1}` to
+  `{manual: 1, scheduled: 1}`. Operators who explicitly want two manual
+  runs in parallel for A/B testing can either (a) bump the constant in a
+  hotfix, or (b) wait for the manual A to complete before launching
+  manual B. There is no env-var override; the prior parallel-manual
+  workflow was not a documented use case.
