@@ -58,6 +58,10 @@ _RETRYABLE_EXC: tuple[type[BaseException], ...] = (
 _RETRYABLE_API_ERROR_MARKERS: tuple[str, ...] = (
     "nonce_finished=false",
     "winner inference incomplete",
+    # SDK-side stream watchdog: "winner stalled waiting for next chunk after
+    # 1m3s". Triggers when an executor stops sending tokens mid-stream. The
+    # failed attempt produced no committed state, so re-submitting is safe.
+    "stalled waiting for next chunk",
 )
 
 # Stream-level transient marker: an empty stream is almost always the tail of
