@@ -32,6 +32,38 @@ _TOP_BY_MARKET_CAP: List[str] = [
 ]
 
 
+# S&P 100 (OEX) — large-cap subset of the S&P 500. Hardcoded as a static
+# snapshot rather than scraped because the constituent list changes ~1×
+# per year and the trade-off (slightly stale vs another flaky network
+# dependency on Wikipedia at run time) matches the rationale for
+# _TOP_BY_MARKET_CAP above. Used to offer operators a mid-sized batch
+# option (~5× larger than top-20 but ~5× faster than the full 503).
+_SP100_TICKERS: List[str] = [
+    "AAPL", "ABBV", "ABT", "ACN", "ADBE", "AIG", "AMD", "AMGN", "AMT", "AMZN",
+    "AVGO", "AXP", "BA", "BAC", "BK", "BKNG", "BLK", "BMY", "BRK.B", "C",
+    "CAT", "CHTR", "CL", "CMCSA", "COF", "COP", "COST", "CRM", "CSCO", "CVS",
+    "CVX", "DE", "DHR", "DIS", "DUK", "EMR", "F", "FDX", "GD", "GE",
+    "GILD", "GM", "GOOG", "GOOGL", "GS", "HD", "HON", "IBM", "INTC", "INTU",
+    "ISRG", "JNJ", "JPM", "KO", "LIN", "LLY", "LMT", "LOW", "MA", "MCD",
+    "MDLZ", "MDT", "MET", "META", "MMM", "MO", "MRK", "MS", "MSFT", "NEE",
+    "NFLX", "NKE", "NVDA", "ORCL", "PEP", "PFE", "PG", "PLD", "PM", "QCOM",
+    "RTX", "SBUX", "SCHW", "SO", "SPG", "T", "TGT", "TMO", "TMUS", "TSLA",
+    "TXN", "UNH", "UNP", "UPS", "USB", "V", "VZ", "WFC", "WMT", "XOM",
+]
+
+
+def get_sp100_tickers() -> List[str]:
+    """Return the S&P 100 (OEX) constituent list.
+
+    Honors the ``SP500_TICKERS`` env override the same way ``get_top_tickers``
+    does, so a one-off run can re-target without code changes.
+    """
+    env_list = _from_env()
+    if env_list is not None:
+        return env_list
+    return list(_SP100_TICKERS)
+
+
 def _from_env() -> List[str] | None:
     raw = os.environ.get("SP500_TICKERS")
     if not raw:

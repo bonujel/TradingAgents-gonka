@@ -59,6 +59,9 @@
 
       <div class="flex flex-wrap gap-2">
         <button class="btn" type="button" @click="loadTopTickers">Top 20 S&P 500</button>
+        <button class="btn" type="button" @click="loadSp100" :disabled="loadingTickers">
+          {{ loadingTickers ? "Loading…" : "S&P 100" }}
+        </button>
         <button class="btn" type="button" @click="loadFullSp500" :disabled="loadingTickers">
           {{ loadingTickers ? "Loading…" : "Full S&P 500" }}
         </button>
@@ -248,6 +251,19 @@ async function loadTopTickers() {
   try {
     const t = await api.topTickers(20);
     tickersInput.value = t.join(", ");
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    loadingTickers.value = false;
+  }
+}
+
+async function loadSp100() {
+  loadingTickers.value = true;
+  try {
+    const t = await api.sp100Tickers();
+    tickersInput.value = t.join(", ");
+    success.value = `Loaded ${t.length} S&P 100 tickers.`;
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {

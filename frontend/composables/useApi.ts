@@ -158,6 +158,7 @@ export function useApi() {
         params: { lines },
       }),
     topTickers: (n = 20) => request<string[]>("/api/tickers/top", { params: { n } }),
+    sp100Tickers: () => request<string[]>("/api/tickers/sp100"),
     sp500Tickers: () => request<string[]>("/api/tickers/sp500"),
   };
 }
