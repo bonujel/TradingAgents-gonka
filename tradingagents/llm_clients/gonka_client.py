@@ -27,12 +27,15 @@ dispatch keep working unchanged downstream.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
 from .base_client import BaseLLMClient
 from .openai_client import NormalizedChatOpenAI
 from .validators import validate_model
+
+logger = logging.getLogger(__name__)
 
 
 # Forwarded verbatim to ``ChatOpenAI`` so callers can tune timeouts and retries
@@ -79,6 +82,72 @@ _GENERATION_DEFAULTS = {"max_tokens": 8192}
 # ``openai_client._PROVIDER_BASE_URL`` because the Gonka provider does not go
 # through the generic OpenAI-compatible code path — it has its own dispatch.
 _ROUTER_BASE_URL = "https://api.gonkascan.com/v1"
+
+
+# Class-level cache of (model_name, base_url) pairs that have been
+# observed to fail the function_calling structured-output path with the
+# specific vLLM "auto tool choice requires --enable-auto-tool-choice
+# and --tool-call-parser" error. Entries persist for the process
+# lifetime only — restarting picks up upstream fixes automatically.
+# We deliberately do not persist this to disk: when the Gonka model
+# operators add the flags, a normal process restart resumes
+# function_calling with no code or config change on the client side.
+_BACKENDS_WITHOUT_TOOL_CALLING: set[tuple[str, str]] = set()
+
+# Substring uniquely identifying the vLLM serving-chat refusal. This is
+# the literal wording from vllm/entrypoints/openai/serving_chat.py —
+# narrow enough not to false-positive on generic 400s, broad enough to
+# survive minor wording changes across vLLM versions. If vLLM ever
+# rewords this line, the wrapper will stop downgrading and the original
+# exception will propagate; the fix is updating this one constant.
+_VLLM_TOOL_CHOICE_ERROR_HINT = "tool choice requires --enable-auto-tool-choice"
+
+
+class _LearningStructuredRunnable:
+    """Wraps a structured-output runnable so the first invocation can
+    detect a backend that lacks vLLM tool-calling flags, rebind the
+    schema with json_mode, and cache that discovery for the rest of the
+    process.
+
+    See dev_notes/gonka-structured-output-resilience-design.md
+    (Component 1) for the full design rationale.
+    """
+
+    def __init__(self, primary, host, schema, extra_kwargs):
+        self._primary = primary
+        self._host = host
+        self._schema = schema
+        self._extra_kwargs = extra_kwargs
+        self._downgraded = None  # built lazily on first downgrade
+
+    def _build_json_mode(self):
+        # Bypass GonkaStreamSafeChatOpenAI.with_structured_output to
+        # avoid re-wrapping ourselves recursively. Reaching directly
+        # into NormalizedChatOpenAI gives us a plain json_mode binding.
+        return NormalizedChatOpenAI.with_structured_output(
+            self._host, self._schema, method="json_mode", **self._extra_kwargs
+        )
+
+    def invoke(self, prompt, *args, **kwargs):
+        if self._downgraded is not None:
+            return self._downgraded.invoke(prompt, *args, **kwargs)
+        try:
+            return self._primary.invoke(prompt, *args, **kwargs)
+        except Exception as exc:
+            if _VLLM_TOOL_CHOICE_ERROR_HINT not in str(exc):
+                raise
+            logger.warning(
+                "%s on %s: vLLM rejected tool-calling structured output (%s); "
+                "downgrading to json_mode for the lifetime of this process. "
+                "Next process start will re-probe — if the backend has been "
+                "fixed, function_calling will be used again automatically.",
+                self._host.model_name, self._host.openai_api_base, exc,
+            )
+            _BACKENDS_WITHOUT_TOOL_CALLING.add(
+                (self._host.model_name, str(self._host.openai_api_base or ""))
+            )
+            self._downgraded = self._build_json_mode()
+            return self._downgraded.invoke(prompt, *args, **kwargs)
 
 
 class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
