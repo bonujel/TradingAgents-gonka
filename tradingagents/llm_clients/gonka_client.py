@@ -188,6 +188,25 @@ class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
                 message["content"] = None
         return payload
 
+    def with_structured_output(self, schema, *, method=None, **kwargs):
+        # Self-healing structured-output dispatch — see
+        # dev_notes/gonka-structured-output-resilience-design.md,
+        # Component 1. When we already know this backend rejects
+        # tool-calling requests, ask the superclass to bind a json_mode
+        # runnable directly. Either way, wrap the result so a *new*
+        # backend (or a backend that has just been fixed upstream) is
+        # discovered on first invoke without any client-side change.
+        cache_key = (self.model_name, str(self.openai_api_base or ""))
+        if method is None and cache_key in _BACKENDS_WITHOUT_TOOL_CALLING:
+            method = "json_mode"
+        primary = super().with_structured_output(schema, method=method, **kwargs)
+        return _LearningStructuredRunnable(
+            primary=primary,
+            host=self,
+            schema=schema,
+            extra_kwargs=kwargs,
+        )
+
 
 class GonkaClient(BaseLLMClient):
     """LLM client for Gonka. Auto-selects SDK vs router transport at runtime.

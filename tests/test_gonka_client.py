@@ -241,3 +241,91 @@ class TestLearningStructuredRunnable:
         assert result == "function_calling_result"
         # Cache stays empty — no broken-backend observation was made.
         assert len(_BACKENDS_WITHOUT_TOOL_CALLING) == 0
+
+
+@pytest.mark.unit
+class TestGonkaWithStructuredOutputIntegration:
+    """GonkaStreamSafeChatOpenAI.with_structured_output consults the
+    cache (skipping function_calling for known-broken backends) and
+    wraps every returned runnable so first-call discovery still works
+    for backends not yet in the cache."""
+
+    def test_returns_learning_wrapper(self, monkeypatch, clear_broken_backends_cache):
+        from tradingagents.llm_clients.gonka_client import (
+            GonkaStreamSafeChatOpenAI,
+            _LearningStructuredRunnable,
+        )
+        # The superclass with_structured_output is replaced with a stub
+        # that returns a sentinel runnable — we only need to check that
+        # the wrapper wraps it.
+        sentinel_primary = MagicMock(name="primary_runnable")
+        monkeypatch.setattr(
+            "tradingagents.llm_clients.openai_client.NormalizedChatOpenAI.with_structured_output",
+            lambda self, schema, **kwargs: sentinel_primary,
+        )
+        host = GonkaStreamSafeChatOpenAI(
+            model="moonshotai/Kimi-K2.6",
+            base_url="https://router.gonkascan.com/v1",
+            api_key="test",
+        )
+        wrapped = host.with_structured_output(object)
+        assert isinstance(wrapped, _LearningStructuredRunnable)
+        assert wrapped._primary is sentinel_primary
+
+    def test_cached_backend_uses_json_mode_method(self, monkeypatch, clear_broken_backends_cache):
+        """When the cache says this backend is broken, with_structured_output
+        delegates with method='json_mode' even if the caller did not specify
+        a method — so the primary runnable is already a json_mode one and
+        the wrapper never has to downgrade."""
+        from tradingagents.llm_clients.gonka_client import (
+            GonkaStreamSafeChatOpenAI,
+            _BACKENDS_WITHOUT_TOOL_CALLING,
+        )
+        captured_kwargs = {}
+
+        def fake_super_with(self, schema, **kwargs):
+            captured_kwargs.update(kwargs)
+            return MagicMock(name="bound_runnable")
+
+        monkeypatch.setattr(
+            "tradingagents.llm_clients.openai_client.NormalizedChatOpenAI.with_structured_output",
+            fake_super_with,
+        )
+        host = GonkaStreamSafeChatOpenAI(
+            model="moonshotai/Kimi-K2.6",
+            base_url="https://router.gonkascan.com/v1",
+            api_key="test",
+        )
+        _BACKENDS_WITHOUT_TOOL_CALLING.add(
+            ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1")
+        )
+        host.with_structured_output(object)
+        assert captured_kwargs.get("method") == "json_mode"
+
+    def test_explicit_method_kwarg_wins_over_cache(self, monkeypatch, clear_broken_backends_cache):
+        """If a caller explicitly passes method=..., we respect it. The
+        cache only fills in method when the caller left it unset."""
+        from tradingagents.llm_clients.gonka_client import (
+            GonkaStreamSafeChatOpenAI,
+            _BACKENDS_WITHOUT_TOOL_CALLING,
+        )
+        captured_kwargs = {}
+
+        def fake_super_with(self, schema, **kwargs):
+            captured_kwargs.update(kwargs)
+            return MagicMock(name="bound_runnable")
+
+        monkeypatch.setattr(
+            "tradingagents.llm_clients.openai_client.NormalizedChatOpenAI.with_structured_output",
+            fake_super_with,
+        )
+        host = GonkaStreamSafeChatOpenAI(
+            model="moonshotai/Kimi-K2.6",
+            base_url="https://router.gonkascan.com/v1",
+            api_key="test",
+        )
+        _BACKENDS_WITHOUT_TOOL_CALLING.add(
+            ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1")
+        )
+        host.with_structured_output(object, method="function_calling")
+        assert captured_kwargs.get("method") == "function_calling"
