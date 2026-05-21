@@ -720,7 +720,14 @@ class TestPortfolioManagerInjection:
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model
         produced, so the pipeline never blocks."""
-        plain_response = "**Rating**: Sell\n\nExit ahead of guidance."
+        # Keep this at >= 80 chars (the threshold enforced in
+        # tradingagents/agents/utils/structured.py:_MIN_RENDERED_CHARS); a
+        # too-short fallback now raises StructuredOutputEmpty by design.
+        plain_response = (
+            "**Rating**: Sell\n\n"
+            "Exit ahead of guidance: margin trajectory deteriorating, "
+            "no near-term catalyst, downside risk unbalanced."
+        )
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
