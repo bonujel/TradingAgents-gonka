@@ -58,6 +58,23 @@ _PASSTHROUGH_KWARGS = ("timeout", "max_retries", "callbacks", "streaming")
 _STREAMING_DEFAULTS = {"streaming": True, "stream_usage": True}
 
 
+# Generation-budget defaults applied to every Gonka call regardless of
+# transport. ``max_tokens=8192`` is set high enough that reasoning models
+# (e.g. Kimi-K2.6) don't burn their entire budget on internal CoT before
+# producing a single visible chunk. Background:
+#   * Reasoning models stream their CoT tokens through the same SSE channel
+#     as the visible answer, but with empty ``delta.content``. LangChain's
+#     ``generate_from_stream`` raises ``ValueError: No generations found
+#     in stream`` when zero content chunks arrive (chat_models.py:223).
+#   * Empirical 2026-05-20 batch on Kimi: ~85% of completion tokens went to
+#     reasoning. A 1024-token cap (or any other low default) left near-zero
+#     budget for visible output → the ValueError fired for every retry.
+# 8192 is loose enough for Kimi's reasoning + ~2k visible answer; non-
+# reasoning models (Qwen3-Instruct) simply ignore the headroom — they stop
+# at finish_reason='stop' well below the cap, so there's no cost impact.
+_GENERATION_DEFAULTS = {"max_tokens": 8192}
+
+
 # The centralised router endpoint. Hardcoded here rather than in
 # ``openai_client._PROVIDER_BASE_URL`` because the Gonka provider does not go
 # through the generic OpenAI-compatible code path — it has its own dispatch.
@@ -147,14 +164,17 @@ class GonkaClient(BaseLLMClient):
     # ── builders ───────────────────────────────────────────────────────────
 
     def _apply_streaming_defaults(self, llm_kwargs: dict[str, Any]) -> None:
-        """Layer streaming defaults under any user-supplied overrides.
+        """Layer streaming + generation-budget defaults under user overrides.
 
-        Caller-passed kwargs win — operators who pass ``streaming=False`` get
-        the legacy buffered behavior. ``stream_usage`` only takes effect when
-        streaming is on, so we mirror that.
+        Caller-passed kwargs win — operators who pass ``streaming=False`` or
+        a custom ``max_tokens`` get their value through. ``stream_usage``
+        only takes effect when streaming is on, so we mirror that. See the
+        ``_STREAMING_DEFAULTS`` and ``_GENERATION_DEFAULTS`` block comments
+        above for the rationale behind each default.
         """
-        for key, value in _STREAMING_DEFAULTS.items():
-            llm_kwargs.setdefault(key, self.kwargs.get(key, value))
+        for defaults in (_STREAMING_DEFAULTS, _GENERATION_DEFAULTS):
+            for key, value in defaults.items():
+                llm_kwargs.setdefault(key, self.kwargs.get(key, value))
 
     def _build_sdk_llm(self, source_url: str, private_key: str) -> Any:
         import httpx
