@@ -230,3 +230,31 @@ class TestResearchManagerAgent:
         rm = create_research_manager(llm)
         result = rm(_make_rm_state())
         assert result["investment_plan"] == plain_response
+
+
+# ---------------------------------------------------------------------------
+# Structured helper: empty / short content handling (resilience against
+# upstream stream truncation; see dev_notes/kimi-run-23-2026-05-20.md and
+# dev_notes/gonka-structured-output-resilience-design.md)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestStructuredHelperEmptyContent:
+    """Empty / near-empty fallback content must raise so the runner can retry,
+    not be silently written into trader_investment_plan / investment_plan /
+    final_trade_decision (cause of run 23 ok_empty_final records)."""
+
+    def test_empty_exception_is_value_error_with_runner_marker(self):
+        """Contract with app/runner.py _RETRYABLE_VALUE_ERROR_MARKERS.
+
+        The runner whitelists retryable transient failures by exception
+        type + substring; StructuredOutputEmpty must satisfy both so the
+        existing 5s/15s/45s backoff engages.
+        """
+        from tradingagents.agents.utils.structured import StructuredOutputEmpty
+        exc = StructuredOutputEmpty(
+            "Trader: no usable content from structured output (got 0 chars)"
+        )
+        assert isinstance(exc, ValueError)
+        assert "no usable content from structured output" in str(exc)

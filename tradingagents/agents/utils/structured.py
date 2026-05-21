@@ -28,6 +28,29 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+# Threshold below which a rendered structured-output response is treated
+# as a stream-truncation / empty-fallback artifact rather than a genuine
+# short answer. Picked from kimi-run-23 evidence: the shortest legitimately
+# useful final_trade_decision observed was ~320 chars; degenerate outputs
+# were either empty or under ~240 chars and visibly truncated mid-sentence.
+# 80 is well below the legitimate floor while still catching empty /
+# near-empty strings unambiguously.
+_MIN_RENDERED_CHARS = 80
+
+
+class StructuredOutputEmpty(ValueError):
+    """Raised when both the structured-output render and the free-text
+    fallback produce fewer than ``min_chars`` non-whitespace characters.
+
+    Subclasses ``ValueError`` (not ``RuntimeError``) so it lines up with
+    app/runner.py's existing retryable-``ValueError``-marker pattern: the
+    exception message MUST contain the substring "no usable content from
+    structured output" so ``_RETRYABLE_VALUE_ERROR_MARKERS`` recognises
+    it and engages the standard 5s -> 15s -> 45s backoff. See
+    dev_notes/gonka-structured-output-resilience-design.md, Component 4.
+    """
+
+
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Optional[Any]:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
 
