@@ -223,7 +223,14 @@ class TestResearchManagerAgent:
             assert f"**{tier}**" in prompt, f"missing {tier} in prompt"
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
-        plain_response = "**Recommendation**: Sell\n\n**Rationale**: ...\n\n**Strategic Actions**: ..."
+        # Keep this at >= 80 chars (the threshold enforced in
+        # tradingagents/agents/utils/structured.py:_MIN_RENDERED_CHARS); a
+        # too-short fallback now raises StructuredOutputEmpty by design.
+        plain_response = (
+            "**Recommendation**: Sell\n\n"
+            "**Rationale**: Margin trajectory deteriorating; no near-term catalyst.\n\n"
+            "**Strategic Actions**: Exit position over the next two sessions."
+        )
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
