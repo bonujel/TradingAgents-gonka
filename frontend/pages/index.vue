@@ -15,7 +15,7 @@
 
     <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <MetricCard label="Trade dates" :value="dates.length" hint="Calendar days on record" />
-      <MetricCard label="Showing" :value="rows.length" hint="Rows after filter" />
+      <MetricCard label="Showing" :value="filteredRows.length" hint="Rows after filter" />
       <MetricCard
         label="Succeeded"
         :value="successCount"
@@ -29,7 +29,7 @@
     </section>
 
     <section class="card space-y-4 p-5">
-      <div class="grid gap-3 sm:grid-cols-3">
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div>
           <label class="label mb-1">Trade date</label>
           <select v-model="selectedDate" class="input" :disabled="!dates.length">
@@ -45,6 +45,13 @@
             class="input uppercase"
           />
         </div>
+        <div>
+          <label class="label mb-1">Model</label>
+          <select v-model="selectedModel" class="input" :disabled="!availableModels.length">
+            <option value="">All models</option>
+            <option v-for="m in availableModels" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
         <div class="flex items-end gap-2">
           <div class="flex-1">
             <label class="label mb-1">Rows on page</label>
@@ -53,10 +60,13 @@
             </select>
           </div>
           <button
-            v-if="tickerFilter"
+            v-if="tickerFilter || selectedModel"
             class="btn btn-ghost"
             type="button"
-            @click="tickerFilter = ''"
+            @click="
+              tickerFilter = '';
+              selectedModel = '';
+            "
           >
             Clear
           </button>
@@ -123,6 +133,7 @@ const dates = ref<string[]>([]);
 const selectedDate = ref<string>("");
 const rows = ref<DecisionRow[]>([]);
 const tickerFilter = ref("");
+const selectedModel = ref("");
 const pageSize = ref(20);
 const page = ref(0);
 
@@ -158,10 +169,24 @@ async function loadAll() {
 
 watch(selectedDate, () => loadRows());
 
+// Distinct deep_model values present in the currently-loaded date's rows.
+// Sorted alphabetically so the dropdown order is stable when models rotate.
+const availableModels = computed(() => {
+  const seen = new Set<string>();
+  for (const r of rows.value) {
+    if (r.deep_model) seen.add(r.deep_model);
+  }
+  return [...seen].sort();
+});
+
 const filteredRows = computed(() => {
   const f = tickerFilter.value.trim().toUpperCase();
-  if (!f) return rows.value;
-  return rows.value.filter((r) => r.ticker.includes(f));
+  const m = selectedModel.value;
+  return rows.value.filter((r) => {
+    if (f && !r.ticker.includes(f)) return false;
+    if (m && r.deep_model !== m) return false;
+    return true;
+  });
 });
 
 const successCount = computed(() => filteredRows.value.filter((r) => !r.error).length);
@@ -179,6 +204,14 @@ const pagedRows = computed(() => {
 watch(filteredRows, () => {
   if (page.value >= totalPages.value) {
     page.value = 0;
+  }
+});
+
+// Drop the selected model if it's no longer present on the new trade date,
+// otherwise the user sees zero rows with no visual cue why.
+watch(availableModels, (models) => {
+  if (selectedModel.value && !models.includes(selectedModel.value)) {
+    selectedModel.value = "";
   }
 });
 
