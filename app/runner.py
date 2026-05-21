@@ -68,6 +68,11 @@ _RETRYABLE_API_ERROR_MARKERS: tuple[str, ...] = (
 # an upstream disconnect that didn't surface as RemoteProtocolError.
 _RETRYABLE_VALUE_ERROR_MARKERS: tuple[str, ...] = (
     "No generations found in stream",
+    # StructuredOutputEmpty from tradingagents/agents/utils/structured.py.
+    # Raised when Trader / RM / PM produced no usable content (typically
+    # caused by upstream stream truncation), so the existing 5s/15s/45s
+    # backoff applies. See dev_notes/gonka-structured-output-resilience-design.md.
+    "no usable content from structured output",
 )
 
 
