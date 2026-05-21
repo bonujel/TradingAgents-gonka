@@ -258,3 +258,57 @@ class TestStructuredHelperEmptyContent:
         )
         assert isinstance(exc, ValueError)
         assert "no usable content from structured output" in str(exc)
+
+    def test_empty_freetext_fallback_raises(self):
+        from tradingagents.agents.utils.structured import StructuredOutputEmpty
+        llm = MagicMock()
+        # Force the free-text branch by making structured-output unsupported.
+        llm.with_structured_output.side_effect = NotImplementedError("unsupported")
+        llm.invoke.return_value = MagicMock(content="")
+        trader = create_trader(llm)
+        with pytest.raises(StructuredOutputEmpty) as exc_info:
+            trader(_make_trader_state())
+        # Marker present so the runner classifies as retryable.
+        assert "no usable content from structured output" in str(exc_info.value)
+
+    def test_whitespace_only_fallback_raises(self):
+        from tradingagents.agents.utils.structured import StructuredOutputEmpty
+        llm = MagicMock()
+        llm.with_structured_output.side_effect = NotImplementedError("unsupported")
+        llm.invoke.return_value = MagicMock(content="   \n\t  ")
+        trader = create_trader(llm)
+        with pytest.raises(StructuredOutputEmpty):
+            trader(_make_trader_state())
+
+    def test_short_structured_render_falls_through_to_freetext(self):
+        """Structured returns a valid schema but the render is sub-threshold;
+        free-text returns enough content. Free-text result wins."""
+        captured = {}
+        # A minimal TraderProposal renders to ~70 chars (action + reasoning).
+        short_proposal = TraderProposal(action=TraderAction.HOLD, reasoning="x.")
+        structured = MagicMock()
+        structured.invoke.side_effect = lambda prompt: (
+            captured.__setitem__("prompt", prompt) or short_proposal
+        )
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured
+        long_plain = (
+            "**Action**: Hold\n\n"
+            + ("Detailed reasoning across multiple factors. " * 5)
+            + "\n\nFINAL TRANSACTION PROPOSAL: **HOLD**"
+        )
+        llm.invoke.return_value = MagicMock(content=long_plain)
+        trader = create_trader(llm)
+        result = trader(_make_trader_state())
+        assert result["trader_investment_plan"] == long_plain
+
+    def test_rm_empty_fallback_raises(self):
+        """Research Manager shares the same helper — coverage proves the
+        helper change applies uniformly, not just to Trader."""
+        from tradingagents.agents.utils.structured import StructuredOutputEmpty
+        llm = MagicMock()
+        llm.with_structured_output.side_effect = NotImplementedError("unsupported")
+        llm.invoke.return_value = MagicMock(content="")
+        rm = create_research_manager(llm)
+        with pytest.raises(StructuredOutputEmpty):
+            rm(_make_rm_state())

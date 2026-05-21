@@ -74,6 +74,7 @@ def invoke_structured_or_freetext(
     prompt: Any,
     render: Callable[[T], str],
     agent_name: str,
+    min_chars: int = _MIN_RENDERED_CHARS,
 ) -> str:
     """Run the structured call and render to markdown; fall back to free-text on any failure.
 
@@ -81,11 +82,24 @@ def invoke_structured_or_freetext(
     invocations, a list of message dicts for chat models that take that
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
+
+    Raises ``StructuredOutputEmpty`` if neither path produces at least
+    ``min_chars`` characters of non-whitespace content. The exception
+    is a ``ValueError`` subclass whose message contains the marker
+    "no usable content from structured output" so the runner classifies
+    it as retryable (see ``app/runner.py:_RETRYABLE_VALUE_ERROR_MARKERS``).
     """
     if structured_llm is not None:
         try:
             result = structured_llm.invoke(prompt)
-            return render(result)
+            rendered = render(result)
+            if len(rendered.strip()) >= min_chars:
+                return rendered
+            logger.warning(
+                "%s: structured output rendered to %d chars (<%d); "
+                "falling back to free text",
+                agent_name, len(rendered.strip()), min_chars,
+            )
         except Exception as exc:
             logger.warning(
                 "%s: structured-output invocation failed (%s); retrying once as free text",
@@ -93,4 +107,11 @@ def invoke_structured_or_freetext(
             )
 
     response = plain_llm.invoke(prompt)
-    return response.content
+    content = response.content or ""
+    if len(content.strip()) < min_chars:
+        raise StructuredOutputEmpty(
+            f"{agent_name}: no usable content from structured output "
+            f"(got {len(content.strip())} chars, threshold {min_chars}). "
+            f"Likely upstream stream truncation; runner will retry."
+        )
+    return content
