@@ -27,6 +27,7 @@ dispatch keep working unchanged downstream.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 from typing import Any, Optional
@@ -84,97 +85,84 @@ _GENERATION_DEFAULTS = {"max_tokens": 8192}
 _ROUTER_BASE_URL = "https://api.gonkascan.com/v1"
 
 
-# Class-level cache of (model_name, base_url) pairs that have been
-# observed to fail the function_calling structured-output path with the
-# specific vLLM "auto tool choice requires --enable-auto-tool-choice
-# and --tool-call-parser" error. Entries persist for the process
-# lifetime only — restarting picks up upstream fixes automatically.
-# We deliberately do not persist this to disk: when the Gonka model
-# operators add the flags, a normal process restart resumes
-# function_calling with no code or config change on the client side.
-_BACKENDS_WITHOUT_TOOL_CALLING: set[tuple[str, str]] = set()
+def _inline_schema_refs(schema: dict) -> dict:
+    """Return ``schema`` with every ``$ref`` inlined and ``$defs`` removed.
 
-# Substring uniquely identifying the vLLM serving-chat refusal. This is
-# the literal wording from vllm/entrypoints/openai/serving_chat.py —
-# narrow enough not to false-positive on generic 400s, broad enough to
-# survive minor wording changes across vLLM versions. If vLLM ever
-# rewords this line, the wrapper will stop downgrading and the original
-# exception will propagate; the fix is updating this one constant.
-_VLLM_TOOL_CHOICE_ERROR_HINT = "tool choice requires --enable-auto-tool-choice"
+    Pydantic v2 emits enum and nested-model definitions under ``$defs`` and
+    points at them with ``$ref``. Gonka's gateway rejects any json_schema
+    that still carries ``$defs`` ("schema reference keyword is forbidden"),
+    so a structured-output schema must be made fully self-contained before
+    it is sent as a ``response_format``.
+    """
+    schema = copy.deepcopy(schema)
+    defs = schema.pop("$defs", {})
+
+    def deref(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if ref is not None:
+                target = deref(copy.deepcopy(defs.get(ref.split("/")[-1], {})))
+                # Keep any sibling keys placed next to the $ref.
+                return {**target, **{k: v for k, v in node.items() if k != "$ref"}}
+            return {k: deref(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [deref(item) for item in node]
+        return node
+
+    return deref(schema)
 
 
-class _LearningStructuredRunnable:
-    """Wraps a structured-output runnable so the first invocation can
-    detect a backend that lacks working vLLM tool-calling, rebind the
-    schema with json_mode, and cache that discovery for the rest of the
-    process.
+def _json_schema_response_format(schema: Any) -> dict:
+    """Build an OpenAI ``response_format`` block for a Pydantic schema."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": getattr(schema, "__name__", "StructuredOutput"),
+            "strict": True,
+            "schema": _inline_schema_refs(schema.model_json_schema()),
+        },
+    }
 
-    Two failure modes trigger the downgrade, both rooted in incomplete
-    tool-calling support on the Gonka vLLM backend:
 
-    * **Hard failure** — vLLM rejects the request with a 400 whose body
-      contains ``tool choice requires --enable-auto-tool-choice``.
-    * **Silent failure** — the backend accepts the request but the model
-      (notably the Kimi reasoning models) answers in plain prose without
-      emitting the forced tool call. LangChain's tool parser then yields
-      ``None``. function_calling can never succeed on such a backend, so
-      a ``None`` return is treated exactly like the hard failure.
+class _GonkaJsonSchemaRunnable:
+    """Stateless structured-output runnable for Gonka backends.
 
-    See dev_notes/gonka-structured-output-resilience-design.md
-    (Component 1) for the full design rationale.
+    Every ``invoke`` is one independent ``response_format=json_schema``
+    request. vLLM's guided decoding constrains the completion to the
+    schema server-side; unlike tool-calling it does **not** require the
+    executor to have been started with ``--enable-auto-tool-choice`` /
+    ``--tool-call-parser`` — flags that are inconsistently configured
+    across Gonka's decentralised executor fleet, which made the old
+    function_calling path "sometimes work, sometimes not".
+
+    There is deliberately **no process-level mode cache**. In a
+    decentralised fan-out every request may land on a different executor,
+    so one request's failure carries no information about the next;
+    caching a "downgrade" would poison requests that would have
+    succeeded. A failed json_schema call is handled per-call by the
+    caller (``invoke_structured_or_freetext``: retry once, then free
+    text), with no state surviving the call.
     """
 
-    def __init__(self, primary, host, schema, extra_kwargs):
-        self._primary = primary
+    def __init__(self, host: Any, schema: Any) -> None:
         self._host = host
         self._schema = schema
-        self._extra_kwargs = extra_kwargs
-        self._downgraded = None  # built lazily on first downgrade
+        self._response_format = _json_schema_response_format(schema)
 
-    def _build_json_mode(self):
-        # Bypass GonkaStreamSafeChatOpenAI.with_structured_output to
-        # avoid re-wrapping ourselves recursively. Reaching directly
-        # into NormalizedChatOpenAI gives us a plain json_mode binding.
-        return NormalizedChatOpenAI.with_structured_output(
-            self._host, self._schema, method="json_mode", **self._extra_kwargs
-        )
-
-    def _downgrade(self, reason: str) -> None:
-        """Log once, cache the discovery, and build the json_mode runnable."""
-        logger.warning(
-            "%s on %s: %s; downgrading structured output to json_mode for "
-            "the lifetime of this process. Next process start will re-probe "
-            "— if the backend has been fixed, function_calling resumes "
-            "automatically.",
-            self._host.model_name, self._host.openai_api_base, reason,
-        )
-        _BACKENDS_WITHOUT_TOOL_CALLING.add(
-            (self._host.model_name, str(self._host.openai_api_base or ""))
-        )
-        self._downgraded = self._build_json_mode()
-
-    def invoke(self, prompt, *args, **kwargs):
-        if self._downgraded is not None:
-            return self._downgraded.invoke(prompt, *args, **kwargs)
-        try:
-            result = self._primary.invoke(prompt, *args, **kwargs)
-        except Exception as exc:
-            if _VLLM_TOOL_CHOICE_ERROR_HINT not in str(exc):
-                raise
-            self._downgrade(
-                f"vLLM rejected tool-calling structured output ({exc})"
+    def invoke(self, prompt: Any, *args: Any, **kwargs: Any) -> Any:
+        bound = self._host.bind(response_format=self._response_format)
+        message = bound.invoke(prompt, *args, **kwargs)
+        content = getattr(message, "content", message)
+        if isinstance(content, list):
+            # Multimodal content blocks — concatenate the text parts.
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
             )
-            return self._downgraded.invoke(prompt, *args, **kwargs)
-        if result is not None:
-            return result
-        # The backend accepted the request but the model emitted no tool
-        # call, so LangChain's tool parser returned None. Same root cause
-        # as the 400 above (incomplete tool-calling support); downgrade
-        # and retry this same prompt on json_mode.
-        self._downgrade(
-            "structured-output call returned no tool call (parser yielded None)"
-        )
-        return self._downgraded.invoke(prompt, *args, **kwargs)
+        # An empty / truncated / non-conforming completion raises
+        # pydantic ValidationError here; the caller catches it.
+        return self._schema.model_validate_json(content or "")
 
 
 class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
@@ -216,23 +204,16 @@ class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
         return payload
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        # Self-healing structured-output dispatch — see
-        # dev_notes/gonka-structured-output-resilience-design.md,
-        # Component 1. When we already know this backend rejects
-        # tool-calling requests, ask the superclass to bind a json_mode
-        # runnable directly. Either way, wrap the result so a *new*
-        # backend (or a backend that has just been fixed upstream) is
-        # discovered on first invoke without any client-side change.
-        cache_key = (self.model_name, str(self.openai_api_base or ""))
-        if method is None and cache_key in _BACKENDS_WITHOUT_TOOL_CALLING:
-            method = "json_mode"
-        primary = super().with_structured_output(schema, method=method, **kwargs)
-        return _LearningStructuredRunnable(
-            primary=primary,
-            host=self,
-            schema=schema,
-            extra_kwargs=kwargs,
-        )
+        """Return a stateless json_schema structured-output runnable.
+
+        json_schema is the sole structured-output path for Gonka.
+        function_calling proved unreliable on the decentralised executor
+        fleet — it depends on per-executor vLLM tool-calling flags that
+        operators configure inconsistently — whereas json_schema rides
+        vLLM's guided decoding, which is on by default. The ``method``
+        argument is accepted for API compatibility but ignored.
+        """
+        return _GonkaJsonSchemaRunnable(host=self, schema=schema)
 
 
 class GonkaClient(BaseLLMClient):

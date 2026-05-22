@@ -94,293 +94,143 @@ def test_sdk_llm_sets_same_kimi_safe_generation_defaults(monkeypatch):
     assert llm.kwargs["stream_usage"] is True
     assert llm.kwargs["max_tokens"] == 8192
 
-
 # ---------------------------------------------------------------------------
-# Self-healing structured-output wrapper (see
-# dev_notes/gonka-structured-output-resilience-design.md, Component 1)
+# json_schema structured output (方案 X). function_calling, json_mode and the
+# self-healing downgrade machinery (_LearningStructuredRunnable, the
+# (model, base_url) cache) were removed — json_schema is the sole path.
 # ---------------------------------------------------------------------------
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
-
-@pytest.fixture
-def clear_broken_backends_cache():
-    """Reset the process-level cache between tests in this class so each
-    case starts from a clean state."""
-    from tradingagents.llm_clients import gonka_client as gc
-    gc._BACKENDS_WITHOUT_TOOL_CALLING.clear()
-    yield
-    gc._BACKENDS_WITHOUT_TOOL_CALLING.clear()
+from tradingagents.agents.schemas import (
+    PortfolioDecision,
+    ResearchPlan,
+    TraderProposal,
+)
 
 
 @pytest.mark.unit
-class TestLearningStructuredRunnable:
-    """The wrapper detects a backend without working tool-calling on the
-    first invoke — either a vLLM 'auto tool choice' 400 or a silent None
-    return (model emitted no tool call) — switches to a json_mode
-    runnable, and caches that decision for the process lifetime so
-    subsequent calls skip the function_calling attempt entirely."""
+class TestInlineSchemaRefs:
+    """Gonka's gateway rejects $defs/$ref; the schema must be flattened
+    self-contained before it is sent as a json_schema response_format."""
 
-    def test_module_state_exists(self):
+    def test_inlines_ref_and_drops_defs(self):
+        from tradingagents.llm_clients.gonka_client import _inline_schema_refs
+
+        raw = {
+            "$defs": {"Color": {"type": "string", "enum": ["R", "B"]}},
+            "type": "object",
+            "properties": {"c": {"$ref": "#/$defs/Color"}},
+            "required": ["c"],
+        }
+        out = _inline_schema_refs(raw)
+        assert "$defs" not in out
+        assert out["properties"]["c"] == {"type": "string", "enum": ["R", "B"]}
+        assert "$ref" not in json.dumps(out)
+
+    def test_sibling_keys_next_to_ref_are_kept(self):
+        from tradingagents.llm_clients.gonka_client import _inline_schema_refs
+
+        raw = {
+            "$defs": {"E": {"type": "string", "enum": ["x"]}},
+            "type": "object",
+            "properties": {"f": {"$ref": "#/$defs/E", "description": "a field"}},
+        }
+        out = _inline_schema_refs(raw)
+        assert out["properties"]["f"]["description"] == "a field"
+        assert out["properties"]["f"]["enum"] == ["x"]
+
+    def test_real_agent_schemas_flatten_without_refs(self):
+        from tradingagents.llm_clients.gonka_client import _json_schema_response_format
+
+        for schema in (ResearchPlan, TraderProposal, PortfolioDecision):
+            rf = _json_schema_response_format(schema)
+            assert rf["type"] == "json_schema"
+            assert rf["json_schema"]["name"] == schema.__name__
+            assert rf["json_schema"]["strict"] is True
+            blob = json.dumps(rf)
+            assert "$defs" not in blob
+            assert "$ref" not in blob
+
+
+@pytest.mark.unit
+class TestGonkaJsonSchemaRunnable:
+    """with_structured_output returns a stateless json_schema runnable that
+    parses the model's JSON completion into the Pydantic schema."""
+
+    def test_with_structured_output_returns_json_schema_runnable(self):
+        from tradingagents.llm_clients.gonka_client import (
+            GonkaStreamSafeChatOpenAI,
+            _GonkaJsonSchemaRunnable,
+        )
+
+        host = GonkaStreamSafeChatOpenAI(
+            model="moonshotai/Kimi-K2.6",
+            base_url="https://router.gonkascan.com/v1",
+            api_key="test",
+        )
+        runnable = host.with_structured_output(ResearchPlan)
+        assert isinstance(runnable, _GonkaJsonSchemaRunnable)
+
+    def test_invoke_parses_completion_into_pydantic(self):
+        from tradingagents.llm_clients.gonka_client import _GonkaJsonSchemaRunnable
+
+        host = MagicMock()
+        message = MagicMock()
+        message.content = (
+            '{"recommendation": "Buy", "rationale": "Strong services growth",'
+            ' "strategic_actions": "Scale in on weakness"}'
+        )
+        host.bind.return_value.invoke.return_value = message
+
+        runnable = _GonkaJsonSchemaRunnable(host, ResearchPlan)
+        result = runnable.invoke("prompt")
+
+        assert isinstance(result, ResearchPlan)
+        assert result.recommendation.value == "Buy"
+        # The flattened json_schema response_format reached the model.
+        rf = host.bind.call_args.kwargs["response_format"]
+        assert rf["type"] == "json_schema"
+        assert "$defs" not in json.dumps(rf)
+
+    def test_invoke_raises_on_truncated_json(self):
+        """A truncated completion (the guided-decoding whitespace trap)
+        surfaces as a ValidationError for the caller to catch + retry."""
+        from pydantic import ValidationError
+
+        from tradingagents.llm_clients.gonka_client import _GonkaJsonSchemaRunnable
+
+        host = MagicMock()
+        message = MagicMock()
+        message.content = '{"recommendation": "Buy", "rationale": "abc'  # truncated
+        host.bind.return_value.invoke.return_value = message
+
+        runnable = _GonkaJsonSchemaRunnable(host, ResearchPlan)
+        with pytest.raises(ValidationError):
+            runnable.invoke("prompt")
+
+    def test_invoke_raises_on_empty_content(self):
+        from pydantic import ValidationError
+
+        from tradingagents.llm_clients.gonka_client import _GonkaJsonSchemaRunnable
+
+        host = MagicMock()
+        message = MagicMock()
+        message.content = ""
+        host.bind.return_value.invoke.return_value = message
+
+        runnable = _GonkaJsonSchemaRunnable(host, ResearchPlan)
+        with pytest.raises(ValidationError):
+            runnable.invoke("prompt")
+
+    def test_no_process_level_downgrade_state(self):
+        """方案 X removed the process-level (model, base_url) downgrade
+        cache and the self-healing wrapper — confirm they are gone."""
         from tradingagents.llm_clients import gonka_client as gc
-        assert isinstance(gc._BACKENDS_WITHOUT_TOOL_CALLING, set)
-        assert "tool choice requires --enable-auto-tool-choice" in gc._VLLM_TOOL_CHOICE_ERROR_HINT
 
-    def test_first_invoke_downgrades_on_vllm_tool_choice_error(self, clear_broken_backends_cache):
-        from tradingagents.llm_clients.gonka_client import (
-            _LearningStructuredRunnable,
-            _BACKENDS_WITHOUT_TOOL_CALLING,
-        )
-
-        primary = MagicMock()
-        primary.invoke.side_effect = RuntimeError(
-            'Error: "auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set'
-        )
-
-        # Stand in for the host LLM. We only need the attributes the
-        # wrapper reads (model_name, openai_api_base) and a downgrade
-        # builder it can call.
-        host = MagicMock()
-        host.model_name = "moonshotai/Kimi-K2.6"
-        host.openai_api_base = "https://router.gonkascan.com/v1"
-        downgraded = MagicMock()
-        downgraded.invoke.return_value = "json_mode_result"
-
-        wrapper = _LearningStructuredRunnable(
-            primary=primary,
-            host=host,
-            schema=object,  # opaque; the downgrade builder is patched below
-            extra_kwargs={},
-        )
-        # Patch the json_mode build so we do not require a real LLM.
-        wrapper._build_json_mode = lambda: downgraded
-
-        result = wrapper.invoke("prompt")
-        assert result == "json_mode_result"
-        # Primary was tried exactly once before the downgrade.
-        primary.invoke.assert_called_once_with("prompt")
-        # Downgrade was invoked exactly once with the same prompt.
-        downgraded.invoke.assert_called_once_with("prompt")
-        # Cache now reflects the broken backend.
-        assert ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1") in _BACKENDS_WITHOUT_TOOL_CALLING
-
-    def test_subsequent_invoke_skips_primary(self, clear_broken_backends_cache):
-        from tradingagents.llm_clients.gonka_client import _LearningStructuredRunnable
-
-        primary = MagicMock()
-        primary.invoke.side_effect = RuntimeError(
-            'Error: "auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set'
-        )
-        host = MagicMock()
-        host.model_name = "moonshotai/Kimi-K2.6"
-        host.openai_api_base = "https://router.gonkascan.com/v1"
-        downgraded = MagicMock()
-        downgraded.invoke.return_value = "json_mode_result"
-
-        wrapper = _LearningStructuredRunnable(
-            primary=primary, host=host, schema=object, extra_kwargs={}
-        )
-        wrapper._build_json_mode = lambda: downgraded
-
-        wrapper.invoke("prompt-1")
-        wrapper.invoke("prompt-2")
-
-        # Primary was attempted only on the first call.
-        assert primary.invoke.call_count == 1
-        # Downgrade handled both calls.
-        assert downgraded.invoke.call_count == 2
-        downgraded.invoke.assert_called_with("prompt-2")
-
-    def test_first_invoke_downgrades_on_none_return(self, clear_broken_backends_cache):
-        """A primary that returns None — the model answered in prose and
-        emitted no tool call, so LangChain's parser yielded None — triggers
-        the same json_mode downgrade as the vLLM 400. The prompt is retried
-        on json_mode and the broken backend is cached."""
-        from tradingagents.llm_clients.gonka_client import (
-            _LearningStructuredRunnable,
-            _BACKENDS_WITHOUT_TOOL_CALLING,
-        )
-
-        primary = MagicMock()
-        primary.invoke.return_value = None  # no tool call -> parser yields None
-        host = MagicMock()
-        host.model_name = "moonshotai/Kimi-K2.6"
-        host.openai_api_base = "https://router.gonkascan.com/v1"
-        downgraded = MagicMock()
-        downgraded.invoke.return_value = "json_mode_result"
-
-        wrapper = _LearningStructuredRunnable(
-            primary=primary, host=host, schema=object, extra_kwargs={}
-        )
-        wrapper._build_json_mode = lambda: downgraded
-
-        result = wrapper.invoke("prompt")
-        assert result == "json_mode_result"
-        primary.invoke.assert_called_once_with("prompt")
-        downgraded.invoke.assert_called_once_with("prompt")
-        assert ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1") in _BACKENDS_WITHOUT_TOOL_CALLING
-
-    def test_none_return_downgrade_is_cached_for_next_call(self, clear_broken_backends_cache):
-        """After a None-triggered downgrade, the next call skips the primary
-        entirely — same caching behaviour as the 400-triggered path."""
-        from tradingagents.llm_clients.gonka_client import _LearningStructuredRunnable
-
-        primary = MagicMock()
-        primary.invoke.return_value = None
-        host = MagicMock()
-        host.model_name = "moonshotai/Kimi-K2.6"
-        host.openai_api_base = "https://router.gonkascan.com/v1"
-        downgraded = MagicMock()
-        downgraded.invoke.return_value = "json_mode_result"
-
-        wrapper = _LearningStructuredRunnable(
-            primary=primary, host=host, schema=object, extra_kwargs={}
-        )
-        wrapper._build_json_mode = lambda: downgraded
-
-        wrapper.invoke("prompt-1")
-        wrapper.invoke("prompt-2")
-
-        assert primary.invoke.call_count == 1
-        assert downgraded.invoke.call_count == 2
-        downgraded.invoke.assert_called_with("prompt-2")
-
-    def test_unrelated_error_propagates_and_does_not_cache(self, clear_broken_backends_cache):
-        from tradingagents.llm_clients.gonka_client import (
-            _LearningStructuredRunnable,
-            _BACKENDS_WITHOUT_TOOL_CALLING,
-        )
-
-        primary = MagicMock()
-        primary.invoke.side_effect = RuntimeError("503 Service Unavailable")
-        host = MagicMock()
-        host.model_name = "moonshotai/Kimi-K2.6"
-        host.openai_api_base = "https://router.gonkascan.com/v1"
-
-        wrapper = _LearningStructuredRunnable(
-            primary=primary, host=host, schema=object, extra_kwargs={}
-        )
-        wrapper._build_json_mode = lambda: (_ for _ in ()).throw(
-            AssertionError("downgrade builder must not be called")
-        )
-
-        with pytest.raises(RuntimeError, match="503"):
-            wrapper.invoke("prompt")
-        assert ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1") not in _BACKENDS_WITHOUT_TOOL_CALLING
-
-    def test_cache_clear_simulates_process_restart(self, clear_broken_backends_cache):
-        """When the cache is empty (process just started) and the primary
-        now succeeds (Gonka has been fixed), function_calling is used and
-        the cache stays empty — no code change required on the client side."""
-        from tradingagents.llm_clients.gonka_client import (
-            _LearningStructuredRunnable,
-            _BACKENDS_WITHOUT_TOOL_CALLING,
-        )
-
-        primary = MagicMock()
-        primary.invoke.return_value = "function_calling_result"
-        host = MagicMock()
-        host.model_name = "moonshotai/Kimi-K2.6"
-        host.openai_api_base = "https://router.gonkascan.com/v1"
-
-        wrapper = _LearningStructuredRunnable(
-            primary=primary, host=host, schema=object, extra_kwargs={}
-        )
-        wrapper._build_json_mode = lambda: (_ for _ in ()).throw(
-            AssertionError("downgrade builder must not be called")
-        )
-
-        result = wrapper.invoke("prompt")
-        assert result == "function_calling_result"
-        # Cache stays empty — no broken-backend observation was made.
-        assert len(_BACKENDS_WITHOUT_TOOL_CALLING) == 0
-
-
-@pytest.mark.unit
-class TestGonkaWithStructuredOutputIntegration:
-    """GonkaStreamSafeChatOpenAI.with_structured_output consults the
-    cache (skipping function_calling for known-broken backends) and
-    wraps every returned runnable so first-call discovery still works
-    for backends not yet in the cache."""
-
-    def test_returns_learning_wrapper(self, monkeypatch, clear_broken_backends_cache):
-        from tradingagents.llm_clients.gonka_client import (
-            GonkaStreamSafeChatOpenAI,
-            _LearningStructuredRunnable,
-        )
-        # The superclass with_structured_output is replaced with a stub
-        # that returns a sentinel runnable — we only need to check that
-        # the wrapper wraps it.
-        sentinel_primary = MagicMock(name="primary_runnable")
-        monkeypatch.setattr(
-            "tradingagents.llm_clients.openai_client.NormalizedChatOpenAI.with_structured_output",
-            lambda self, schema, **kwargs: sentinel_primary,
-        )
-        host = GonkaStreamSafeChatOpenAI(
-            model="moonshotai/Kimi-K2.6",
-            base_url="https://router.gonkascan.com/v1",
-            api_key="test",
-        )
-        wrapped = host.with_structured_output(object)
-        assert isinstance(wrapped, _LearningStructuredRunnable)
-        assert wrapped._primary is sentinel_primary
-
-    def test_cached_backend_uses_json_mode_method(self, monkeypatch, clear_broken_backends_cache):
-        """When the cache says this backend is broken, with_structured_output
-        delegates with method='json_mode' even if the caller did not specify
-        a method — so the primary runnable is already a json_mode one and
-        the wrapper never has to downgrade."""
-        from tradingagents.llm_clients.gonka_client import (
-            GonkaStreamSafeChatOpenAI,
-            _BACKENDS_WITHOUT_TOOL_CALLING,
-        )
-        captured_kwargs = {}
-
-        def fake_super_with(self, schema, **kwargs):
-            captured_kwargs.update(kwargs)
-            return MagicMock(name="bound_runnable")
-
-        monkeypatch.setattr(
-            "tradingagents.llm_clients.openai_client.NormalizedChatOpenAI.with_structured_output",
-            fake_super_with,
-        )
-        host = GonkaStreamSafeChatOpenAI(
-            model="moonshotai/Kimi-K2.6",
-            base_url="https://router.gonkascan.com/v1",
-            api_key="test",
-        )
-        _BACKENDS_WITHOUT_TOOL_CALLING.add(
-            ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1")
-        )
-        host.with_structured_output(object)
-        assert captured_kwargs.get("method") == "json_mode"
-
-    def test_explicit_method_kwarg_wins_over_cache(self, monkeypatch, clear_broken_backends_cache):
-        """If a caller explicitly passes method=..., we respect it. The
-        cache only fills in method when the caller left it unset."""
-        from tradingagents.llm_clients.gonka_client import (
-            GonkaStreamSafeChatOpenAI,
-            _BACKENDS_WITHOUT_TOOL_CALLING,
-        )
-        captured_kwargs = {}
-
-        def fake_super_with(self, schema, **kwargs):
-            captured_kwargs.update(kwargs)
-            return MagicMock(name="bound_runnable")
-
-        monkeypatch.setattr(
-            "tradingagents.llm_clients.openai_client.NormalizedChatOpenAI.with_structured_output",
-            fake_super_with,
-        )
-        host = GonkaStreamSafeChatOpenAI(
-            model="moonshotai/Kimi-K2.6",
-            base_url="https://router.gonkascan.com/v1",
-            api_key="test",
-        )
-        _BACKENDS_WITHOUT_TOOL_CALLING.add(
-            ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1")
-        )
-        host.with_structured_output(object, method="function_calling")
-        assert captured_kwargs.get("method") == "function_calling"
+        assert not hasattr(gc, "_BACKENDS_WITHOUT_TOOL_CALLING")
+        assert not hasattr(gc, "_LearningStructuredRunnable")
+        assert not hasattr(gc, "_VLLM_TOOL_CHOICE_ERROR_HINT")

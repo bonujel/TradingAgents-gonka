@@ -70,6 +70,16 @@ def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Optional[Any]
         return None
 
 
+# How many independent json_schema attempts before giving up on the
+# structured path and falling back to free text. Gonka's json_schema
+# path occasionally truncates — a guided-decoding "whitespace trap"
+# (~8%, see the run-32 analysis) where the model loops on legal
+# whitespace instead of closing the JSON. A second, fully independent
+# attempt — likely routed to a different executor — clears it the vast
+# majority of the time; each attempt holds no state from the last.
+_STRUCTURED_ATTEMPTS = 2
+
+
 def invoke_structured_or_freetext(
     structured_llm: Optional[Any],
     plain_llm: Any,
@@ -85,32 +95,43 @@ def invoke_structured_or_freetext(
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
 
-    Raises ``StructuredOutputEmpty`` if neither path produces at least
-    ``min_chars`` characters of non-whitespace content. The exception
-    is a ``ValueError`` subclass whose message contains the marker
-    "no usable content from structured output" so the runner classifies
-    it as retryable (see ``app/runner.py:_RETRYABLE_VALUE_ERROR_MARKERS``).
+    The structured (json_schema) call is attempted up to
+    ``_STRUCTURED_ATTEMPTS`` times — each attempt independent, no state
+    carried over — before the free-text fallback. Free text has no
+    grammar constraint, so it reliably escapes the json_schema
+    whitespace trap that the retries are there to dodge.
+
+    Raises ``StructuredOutputEmpty`` if the free-text fallback also
+    produces fewer than ``min_chars`` characters of non-whitespace
+    content. The exception is a ``ValueError`` subclass whose message
+    contains the marker "no usable content from structured output" so
+    the runner classifies it as retryable (see
+    ``app/runner.py``'s retryable-ValueError markers).
     """
     if structured_llm is not None:
-        try:
-            result = structured_llm.invoke(prompt)
-            rendered = render(result)
-            if len(rendered.strip()) >= min_chars:
-                # A degenerate render raises DegenerateOutputError, caught
-                # just below — so the free-text path gets a fresh attempt
-                # (likely a different Gonka executor) before giving up.
-                check_not_degenerate(rendered, agent_name)
-                return rendered
-            logger.warning(
-                "%s: structured output rendered to %d chars (<%d); "
-                "falling back to free text",
-                agent_name, len(rendered.strip()), min_chars,
-            )
-        except Exception as exc:
-            logger.warning(
-                "%s: structured-output invocation failed (%s); retrying once as free text",
-                agent_name, exc,
-            )
+        for attempt in range(1, _STRUCTURED_ATTEMPTS + 1):
+            try:
+                result = structured_llm.invoke(prompt)
+                rendered = render(result)
+                if len(rendered.strip()) >= min_chars:
+                    # A degenerate render raises DegenerateOutputError,
+                    # caught below — handled like any structured failure.
+                    check_not_degenerate(rendered, agent_name)
+                    return rendered
+                logger.warning(
+                    "%s: structured output rendered to %d chars (<%d); "
+                    "falling back to free text",
+                    agent_name, len(rendered.strip()), min_chars,
+                )
+                break  # too short — a retry will not help; go to free text
+            except Exception as exc:
+                final = attempt == _STRUCTURED_ATTEMPTS
+                logger.warning(
+                    "%s: structured-output attempt %d/%d failed (%s)%s",
+                    agent_name, attempt, _STRUCTURED_ATTEMPTS, exc,
+                    "; falling back to free text" if final else "; retrying json_schema",
+                )
+                # Non-final attempt: loop retries. Final: fall through.
 
     response = plain_llm.invoke(prompt)
     content = response.content or ""
