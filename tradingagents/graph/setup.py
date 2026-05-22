@@ -149,25 +149,25 @@ class GraphSetup:
         # Add analyst nodes to the graph
         for analyst_type, node in analyst_nodes.items():
             workflow.add_node(
-                f"{analyst_type.capitalize()} Analyst", node, retry=retry_policy
+                f"{analyst_type.capitalize()} Analyst", node, retry_policy=retry_policy
             )
             workflow.add_node(
                 f"Msg Clear {analyst_type.capitalize()}", delete_nodes[analyst_type]
             )
             workflow.add_node(
                 f"tools_{analyst_type}", tool_nodes[analyst_type],
-                retry=retry_policy,
+                retry_policy=retry_policy,
             )
 
         # Add other nodes
-        workflow.add_node("Bull Researcher", bull_researcher_node, retry=retry_policy)
-        workflow.add_node("Bear Researcher", bear_researcher_node, retry=retry_policy)
-        workflow.add_node("Research Manager", research_manager_node, retry=retry_policy)
-        workflow.add_node("Trader", trader_node, retry=retry_policy)
-        workflow.add_node("Aggressive Analyst", aggressive_analyst, retry=retry_policy)
-        workflow.add_node("Neutral Analyst", neutral_analyst, retry=retry_policy)
-        workflow.add_node("Conservative Analyst", conservative_analyst, retry=retry_policy)
-        workflow.add_node("Portfolio Manager", portfolio_manager_node, retry=retry_policy)
+        workflow.add_node("Bull Researcher", bull_researcher_node, retry_policy=retry_policy)
+        workflow.add_node("Bear Researcher", bear_researcher_node, retry_policy=retry_policy)
+        workflow.add_node("Research Manager", research_manager_node, retry_policy=retry_policy)
+        workflow.add_node("Trader", trader_node, retry_policy=retry_policy)
+        workflow.add_node("Aggressive Analyst", aggressive_analyst, retry_policy=retry_policy)
+        workflow.add_node("Neutral Analyst", neutral_analyst, retry_policy=retry_policy)
+        workflow.add_node("Conservative Analyst", conservative_analyst, retry_policy=retry_policy)
+        workflow.add_node("Portfolio Manager", portfolio_manager_node, retry_policy=retry_policy)
 
         # Define edges
         # Start with the first analyst
