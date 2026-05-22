@@ -29,7 +29,7 @@
     </section>
 
     <section class="card space-y-4 p-5">
-      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div>
           <label class="label mb-1">Trade date</label>
           <select v-model="selectedDate" class="input" :disabled="!dates.length">
@@ -46,6 +46,13 @@
           />
         </div>
         <div>
+          <label class="label mb-1">Rating</label>
+          <select v-model="selectedRating" class="input" :disabled="!availableRatings.length">
+            <option value="">All ratings</option>
+            <option v-for="r in availableRatings" :key="r" :value="r">{{ r }}</option>
+          </select>
+        </div>
+        <div>
           <label class="label mb-1">Model</label>
           <select v-model="selectedModel" class="input" :disabled="!availableModels.length">
             <option value="">All models</option>
@@ -60,11 +67,12 @@
             </select>
           </div>
           <button
-            v-if="tickerFilter || selectedModel"
+            v-if="tickerFilter || selectedRating || selectedModel"
             class="btn btn-ghost"
             type="button"
             @click="
               tickerFilter = '';
+              selectedRating = '';
               selectedModel = '';
             "
           >
@@ -133,9 +141,14 @@ const dates = ref<string[]>([]);
 const selectedDate = ref<string>("");
 const rows = ref<DecisionRow[]>([]);
 const tickerFilter = ref("");
+const selectedRating = ref("");
 const selectedModel = ref("");
 const pageSize = ref(20);
 const page = ref(0);
+
+// Canonical five-tier ordering — the dropdown follows this rather than
+// alphabetical so it reads Buy → Sell like the rating scale itself.
+const RATING_ORDER = ["Buy", "Overweight", "Hold", "Underweight", "Sell"];
 
 async function loadDates() {
   try {
@@ -179,11 +192,25 @@ const availableModels = computed(() => {
   return [...seen].sort();
 });
 
+// Distinct ratings present in the loaded rows, in canonical Buy→Sell order.
+// Any unexpected value (shouldn't happen) is appended after the known five.
+const availableRatings = computed(() => {
+  const seen = new Set<string>();
+  for (const r of rows.value) {
+    if (r.rating) seen.add(r.rating);
+  }
+  const known = RATING_ORDER.filter((r) => seen.has(r));
+  const extra = [...seen].filter((r) => !RATING_ORDER.includes(r)).sort();
+  return [...known, ...extra];
+});
+
 const filteredRows = computed(() => {
   const f = tickerFilter.value.trim().toUpperCase();
+  const rating = selectedRating.value;
   const m = selectedModel.value;
   return rows.value.filter((r) => {
     if (f && !r.ticker.includes(f)) return false;
+    if (rating && r.rating !== rating) return false;
     if (m && r.deep_model !== m) return false;
     return true;
   });
@@ -207,11 +234,17 @@ watch(filteredRows, () => {
   }
 });
 
-// Drop the selected model if it's no longer present on the new trade date,
-// otherwise the user sees zero rows with no visual cue why.
+// Drop the selected model/rating if it's no longer present on the new
+// trade date, otherwise the user sees zero rows with no visual cue why.
 watch(availableModels, (models) => {
   if (selectedModel.value && !models.includes(selectedModel.value)) {
     selectedModel.value = "";
+  }
+});
+
+watch(availableRatings, (ratings) => {
+  if (selectedRating.value && !ratings.includes(selectedRating.value)) {
+    selectedRating.value = "";
   }
 });
 
