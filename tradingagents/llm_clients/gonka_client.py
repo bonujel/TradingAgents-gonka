@@ -105,9 +105,20 @@ _VLLM_TOOL_CHOICE_ERROR_HINT = "tool choice requires --enable-auto-tool-choice"
 
 class _LearningStructuredRunnable:
     """Wraps a structured-output runnable so the first invocation can
-    detect a backend that lacks vLLM tool-calling flags, rebind the
+    detect a backend that lacks working vLLM tool-calling, rebind the
     schema with json_mode, and cache that discovery for the rest of the
     process.
+
+    Two failure modes trigger the downgrade, both rooted in incomplete
+    tool-calling support on the Gonka vLLM backend:
+
+    * **Hard failure** — vLLM rejects the request with a 400 whose body
+      contains ``tool choice requires --enable-auto-tool-choice``.
+    * **Silent failure** — the backend accepts the request but the model
+      (notably the Kimi reasoning models) answers in plain prose without
+      emitting the forced tool call. LangChain's tool parser then yields
+      ``None``. function_calling can never succeed on such a backend, so
+      a ``None`` return is treated exactly like the hard failure.
 
     See dev_notes/gonka-structured-output-resilience-design.md
     (Component 1) for the full design rationale.
@@ -128,26 +139,42 @@ class _LearningStructuredRunnable:
             self._host, self._schema, method="json_mode", **self._extra_kwargs
         )
 
+    def _downgrade(self, reason: str) -> None:
+        """Log once, cache the discovery, and build the json_mode runnable."""
+        logger.warning(
+            "%s on %s: %s; downgrading structured output to json_mode for "
+            "the lifetime of this process. Next process start will re-probe "
+            "— if the backend has been fixed, function_calling resumes "
+            "automatically.",
+            self._host.model_name, self._host.openai_api_base, reason,
+        )
+        _BACKENDS_WITHOUT_TOOL_CALLING.add(
+            (self._host.model_name, str(self._host.openai_api_base or ""))
+        )
+        self._downgraded = self._build_json_mode()
+
     def invoke(self, prompt, *args, **kwargs):
         if self._downgraded is not None:
             return self._downgraded.invoke(prompt, *args, **kwargs)
         try:
-            return self._primary.invoke(prompt, *args, **kwargs)
+            result = self._primary.invoke(prompt, *args, **kwargs)
         except Exception as exc:
             if _VLLM_TOOL_CHOICE_ERROR_HINT not in str(exc):
                 raise
-            logger.warning(
-                "%s on %s: vLLM rejected tool-calling structured output (%s); "
-                "downgrading to json_mode for the lifetime of this process. "
-                "Next process start will re-probe — if the backend has been "
-                "fixed, function_calling will be used again automatically.",
-                self._host.model_name, self._host.openai_api_base, exc,
+            self._downgrade(
+                f"vLLM rejected tool-calling structured output ({exc})"
             )
-            _BACKENDS_WITHOUT_TOOL_CALLING.add(
-                (self._host.model_name, str(self._host.openai_api_base or ""))
-            )
-            self._downgraded = self._build_json_mode()
             return self._downgraded.invoke(prompt, *args, **kwargs)
+        if result is not None:
+            return result
+        # The backend accepted the request but the model emitted no tool
+        # call, so LangChain's tool parser returned None. Same root cause
+        # as the 400 above (incomplete tool-calling support); downgrade
+        # and retry this same prompt on json_mode.
+        self._downgrade(
+            "structured-output call returned no tool call (parser yielded None)"
+        )
+        return self._downgraded.invoke(prompt, *args, **kwargs)
 
 
 class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):

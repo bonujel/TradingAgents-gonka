@@ -117,10 +117,11 @@ def clear_broken_backends_cache():
 
 @pytest.mark.unit
 class TestLearningStructuredRunnable:
-    """The wrapper detects the vLLM 'auto tool choice' error on first
-    invoke, switches to a json_mode runnable, and caches that decision
-    for the process lifetime so subsequent calls skip the function_calling
-    attempt entirely."""
+    """The wrapper detects a backend without working tool-calling on the
+    first invoke — either a vLLM 'auto tool choice' 400 or a silent None
+    return (model emitted no tool call) — switches to a json_mode
+    runnable, and caches that decision for the process lifetime so
+    subsequent calls skip the function_calling attempt entirely."""
 
     def test_module_state_exists(self):
         from tradingagents.llm_clients import gonka_client as gc
@@ -189,6 +190,60 @@ class TestLearningStructuredRunnable:
         # Primary was attempted only on the first call.
         assert primary.invoke.call_count == 1
         # Downgrade handled both calls.
+        assert downgraded.invoke.call_count == 2
+        downgraded.invoke.assert_called_with("prompt-2")
+
+    def test_first_invoke_downgrades_on_none_return(self, clear_broken_backends_cache):
+        """A primary that returns None — the model answered in prose and
+        emitted no tool call, so LangChain's parser yielded None — triggers
+        the same json_mode downgrade as the vLLM 400. The prompt is retried
+        on json_mode and the broken backend is cached."""
+        from tradingagents.llm_clients.gonka_client import (
+            _LearningStructuredRunnable,
+            _BACKENDS_WITHOUT_TOOL_CALLING,
+        )
+
+        primary = MagicMock()
+        primary.invoke.return_value = None  # no tool call -> parser yields None
+        host = MagicMock()
+        host.model_name = "moonshotai/Kimi-K2.6"
+        host.openai_api_base = "https://router.gonkascan.com/v1"
+        downgraded = MagicMock()
+        downgraded.invoke.return_value = "json_mode_result"
+
+        wrapper = _LearningStructuredRunnable(
+            primary=primary, host=host, schema=object, extra_kwargs={}
+        )
+        wrapper._build_json_mode = lambda: downgraded
+
+        result = wrapper.invoke("prompt")
+        assert result == "json_mode_result"
+        primary.invoke.assert_called_once_with("prompt")
+        downgraded.invoke.assert_called_once_with("prompt")
+        assert ("moonshotai/Kimi-K2.6", "https://router.gonkascan.com/v1") in _BACKENDS_WITHOUT_TOOL_CALLING
+
+    def test_none_return_downgrade_is_cached_for_next_call(self, clear_broken_backends_cache):
+        """After a None-triggered downgrade, the next call skips the primary
+        entirely — same caching behaviour as the 400-triggered path."""
+        from tradingagents.llm_clients.gonka_client import _LearningStructuredRunnable
+
+        primary = MagicMock()
+        primary.invoke.return_value = None
+        host = MagicMock()
+        host.model_name = "moonshotai/Kimi-K2.6"
+        host.openai_api_base = "https://router.gonkascan.com/v1"
+        downgraded = MagicMock()
+        downgraded.invoke.return_value = "json_mode_result"
+
+        wrapper = _LearningStructuredRunnable(
+            primary=primary, host=host, schema=object, extra_kwargs={}
+        )
+        wrapper._build_json_mode = lambda: downgraded
+
+        wrapper.invoke("prompt-1")
+        wrapper.invoke("prompt-2")
+
+        assert primary.invoke.call_count == 1
         assert downgraded.invoke.call_count == 2
         downgraded.invoke.assert_called_with("prompt-2")
 
