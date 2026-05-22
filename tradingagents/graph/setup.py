@@ -1,13 +1,45 @@
 # TradingAgents/graph/setup.py
 
+import os
 from typing import Any, Dict
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.types import RetryPolicy
 
 from tradingagents.agents import *
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.llm_clients.retry import is_transient_llm_error
 
 from .conditional_logic import ConditionalLogic
+
+
+def _node_retry_policy() -> RetryPolicy:
+    """RetryPolicy attached to every graph node.
+
+    A transient Gonka/transport failure (peer-closed stream, 5xx, 429, a
+    corrupted SSE chunk, ...) re-runs only the failing node — every prior
+    node's committed state is kept — instead of restarting the whole
+    ticker pipeline. This is the cheap first line of defence; the
+    ticker-level loop in app/runner.py stays as a coarse backstop.
+
+    ``retry_on`` shares ``is_transient_llm_error`` with that backstop so
+    the two layers never disagree on what is recoverable.
+
+    Defaults: 3 attempts total, ~2s → 6s backoff with jitter. The attempt
+    count is tunable via ``TRADINGAGENTS_NODE_RETRY_ATTEMPTS``.
+    """
+    try:
+        attempts = max(1, int(os.environ.get("TRADINGAGENTS_NODE_RETRY_ATTEMPTS", "3")))
+    except ValueError:
+        attempts = 3
+    return RetryPolicy(
+        retry_on=is_transient_llm_error,
+        max_attempts=attempts,
+        initial_interval=2.0,
+        backoff_factor=3.0,
+        max_interval=30.0,
+        jitter=True,
+    )
 
 
 class GraphSetup:
@@ -93,23 +125,32 @@ class GraphSetup:
         # Create workflow
         workflow = StateGraph(AgentState)
 
+        # Every node carries the same retry policy: a transient upstream
+        # failure re-runs just that node, not the whole ticker pipeline.
+        retry_policy = _node_retry_policy()
+
         # Add analyst nodes to the graph
         for analyst_type, node in analyst_nodes.items():
-            workflow.add_node(f"{analyst_type.capitalize()} Analyst", node)
+            workflow.add_node(
+                f"{analyst_type.capitalize()} Analyst", node, retry_policy=retry_policy
+            )
             workflow.add_node(
                 f"Msg Clear {analyst_type.capitalize()}", delete_nodes[analyst_type]
             )
-            workflow.add_node(f"tools_{analyst_type}", tool_nodes[analyst_type])
+            workflow.add_node(
+                f"tools_{analyst_type}", tool_nodes[analyst_type],
+                retry_policy=retry_policy,
+            )
 
         # Add other nodes
-        workflow.add_node("Bull Researcher", bull_researcher_node)
-        workflow.add_node("Bear Researcher", bear_researcher_node)
-        workflow.add_node("Research Manager", research_manager_node)
-        workflow.add_node("Trader", trader_node)
-        workflow.add_node("Aggressive Analyst", aggressive_analyst)
-        workflow.add_node("Neutral Analyst", neutral_analyst)
-        workflow.add_node("Conservative Analyst", conservative_analyst)
-        workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node("Bull Researcher", bull_researcher_node, retry_policy=retry_policy)
+        workflow.add_node("Bear Researcher", bear_researcher_node, retry_policy=retry_policy)
+        workflow.add_node("Research Manager", research_manager_node, retry_policy=retry_policy)
+        workflow.add_node("Trader", trader_node, retry_policy=retry_policy)
+        workflow.add_node("Aggressive Analyst", aggressive_analyst, retry_policy=retry_policy)
+        workflow.add_node("Neutral Analyst", neutral_analyst, retry_policy=retry_policy)
+        workflow.add_node("Conservative Analyst", conservative_analyst, retry_policy=retry_policy)
+        workflow.add_node("Portfolio Manager", portfolio_manager_node, retry_policy=retry_policy)
 
         # Define edges
         # Start with the first analyst

@@ -7,6 +7,7 @@ dev_notes/gonka-structured-output-resilience-design.md (Component 4).
 """
 
 import pytest
+from openai import APIError, BadRequestError
 
 from app.runner import _is_retryable
 from tradingagents.agents.utils.structured import StructuredOutputEmpty
@@ -28,4 +29,47 @@ class TestStructuredOutputEmptyIsRetryable:
         though StructuredOutputEmpty inherits from ValueError. The
         whitelist is substring-based, not type-based."""
         exc = ValueError("something else went wrong")
+        assert _is_retryable(exc) is False
+
+
+@pytest.mark.unit
+class TestJsonDecodeApiErrorIsRetryable:
+    """A bare openai.APIError whose message is a JSON decode failure means
+    the SDK could not parse a corrupted streamed SSE chunk — a transient
+    upstream-proxy fault, safe to retry."""
+
+    def test_expecting_delimiter_is_retryable(self):
+        exc = APIError(
+            "Expecting ',' delimiter: line 1 column 34 (char 33)",
+            request=None,  # type: ignore[arg-type]
+            body=None,
+        )
+        assert _is_retryable(exc) is True
+
+    def test_other_json_decode_variants_are_retryable(self):
+        for msg in (
+            "Expecting value: line 1 column 1 (char 0)",
+            "Unterminated string starting at: line 2 column 5 (char 99)",
+            "Expecting property name enclosed in double quotes: "
+            "line 1 column 2 (char 1)",
+        ):
+            exc = APIError(msg, request=None, body=None)  # type: ignore[arg-type]
+            assert _is_retryable(exc) is True, msg
+
+    def test_plain_api_error_without_json_signature_not_retryable(self):
+        """An APIError that is neither a Gonka chain marker nor a JSON
+        decode failure must still fail fast."""
+        exc = APIError(
+            "some unrecognised upstream error",
+            request=None,  # type: ignore[arg-type]
+            body=None,
+        )
+        assert _is_retryable(exc) is False
+
+    def test_bad_request_subclass_not_retryable(self):
+        """BadRequestError subclasses APIError but is a client-side fault;
+        even with a JSON-ish message it must not be retried (the
+        classifier uses a strict `type(exc) is APIError` check)."""
+        exc = BadRequestError.__new__(BadRequestError)
+        Exception.__init__(exc, "bad: line 1 column 2 (char 1)")
         assert _is_retryable(exc) is False

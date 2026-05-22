@@ -17,12 +17,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Iterable, Optional
 
-import httpx
-from openai import APIConnectionError, APIError, InternalServerError, RateLimitError
-
 from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_clients.retry import is_transient_llm_error
 
 from . import db
 from .sp500 import get_top_tickers
@@ -37,78 +35,20 @@ logger = logging.getLogger(__name__)
 # 40% failure rate, with ~80% of failures attributable to transient router-side
 # issues (peer closed connections, 502 Bad Gateway) and another ~14% to a
 # Gonka chain executor bug (winner inference incomplete / nonce_finished=false).
-# All of these are safe to retry: the failed request produced no committed
-# server state, and a fresh attempt may land on a different upstream node or
-# miss the next router blip.
 #
-# The whitelist below errs on the side of *not* retrying anything that smells
-# like a code bug or a malformed request — failing fast there is more useful
-# than burning budget hiding real problems.
+# Such failures are now retried at two granularities:
+#
+#   * Node-level — a LangGraph RetryPolicy on every graph node re-runs only
+#     the failing node, keeping every prior node's committed state. This is
+#     the cheap first line of defence (see tradingagents/graph/setup.py).
+#   * Ticker-level — the loop in run_one() below re-runs the whole pipeline
+#     as a coarse backstop for anything the node layer could not recover.
+#
+# Both layers share one classifier, ``is_transient_llm_error``, so they
+# agree on what counts as recoverable. ``_is_retryable`` is kept as a
+# module-local alias for readability at the call site.
 
-_RETRYABLE_EXC: tuple[type[BaseException], ...] = (
-    httpx.RemoteProtocolError,    # peer closed connection mid-stream (router/CDN)
-    APIConnectionError,           # client-to-router TCP/socket failure
-    InternalServerError,          # 5xx upstream (e.g. nginx 502 Bad Gateway)
-    RateLimitError,               # 429 — backoff already widens, so retry is fine
-)
-
-# Bare openai.APIError is a catch-all: Gonka raises it for chain executor
-# failures with a plain-text message. We only retry the specific markers we
-# recognise so that future, genuinely-fatal APIError variants aren't masked.
-_RETRYABLE_API_ERROR_MARKERS: tuple[str, ...] = (
-    "nonce_finished=false",
-    "winner inference incomplete",
-    # SDK-side stream watchdog: "winner stalled waiting for next chunk after
-    # 1m3s". Triggers when an executor stops sending tokens mid-stream. The
-    # failed attempt produced no committed state, so re-submitting is safe.
-    "stalled waiting for next chunk",
-)
-
-# Stream-level transient marker: an empty stream is almost always the tail of
-# an upstream disconnect that didn't surface as RemoteProtocolError.
-_RETRYABLE_VALUE_ERROR_MARKERS: tuple[str, ...] = (
-    "No generations found in stream",
-    # StructuredOutputEmpty from tradingagents/agents/utils/structured.py.
-    # Raised when Trader / RM / PM produced no usable content (typically
-    # caused by upstream stream truncation), so the existing 5s/15s/45s
-    # backoff applies. See dev_notes/gonka-structured-output-resilience-design.md.
-    "no usable content from structured output",
-)
-
-
-def _is_retryable(exc: BaseException) -> bool:
-    """Decide whether ``exc`` represents a transient upstream failure.
-
-    Retried (whitelist):
-      - ``httpx.RemoteProtocolError``     — peer closed chunked stream
-      - ``openai.APIConnectionError``     — client TCP/socket error
-      - ``openai.InternalServerError``    — 5xx upstream
-      - ``openai.RateLimitError``         — 429 (paired with longer backoff)
-      - bare ``openai.APIError`` whose message matches a Gonka chain marker
-      - ``ValueError`` whose message matches a known empty-stream marker
-
-    Not retried (intentional):
-      - ``GraphRecursionError``           — LangGraph didn't converge, retry
-                                            still hits the 100-step cap
-      - ``openai.BadRequestError`` / ``AuthenticationError`` / etc. — the
-        request itself is wrong; retrying doesn't change the outcome
-      - any other ``ValueError`` / ``KeyError`` / ``TypeError`` — code bug
-    """
-    if isinstance(exc, _RETRYABLE_EXC):
-        return True
-    # Strict type check (not isinstance): only the bare APIError base class
-    # carries Gonka's chain-level errors. APIStatusError subclasses
-    # (BadRequestError, AuthenticationError, ...) inherit from APIError but
-    # are intentionally excluded — their failure mode is not transient.
-    if type(exc) is APIError:
-        msg = str(exc)
-        if any(m in msg for m in _RETRYABLE_API_ERROR_MARKERS):
-            return True
-    if isinstance(exc, ValueError):
-        msg = str(exc)
-        if any(m in msg for m in _RETRYABLE_VALUE_ERROR_MARKERS):
-            return True
-    return False
+_is_retryable = is_transient_llm_error
 
 
 def _env_int(name: str, default: int) -> int:
