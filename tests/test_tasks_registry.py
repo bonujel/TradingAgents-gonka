@@ -249,8 +249,16 @@ def test_api_returns_409_on_recent_duplicate(monkeypatch):
     from fastapi.testclient import TestClient
 
     from app.api import app
+    from app import auth as auth_mod
     from app import tasks as tasks_mod
     from app import api as api_mod
+
+    # Every /api/ route now sits behind the bearer-token dependency.
+    # Override it so this test can exercise the run-launch logic without
+    # minting a token; monkeypatch.setitem restores it afterwards.
+    monkeypatch.setitem(
+        app.dependency_overrides, auth_mod.require_authenticated, lambda: None
+    )
 
     monkeypatch.setattr(
         api_mod,
