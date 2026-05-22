@@ -38,6 +38,15 @@ class ToYahooSymbolTests(unittest.TestCase):
     def test_whitespace_stripped(self):
         self.assertEqual(to_yahoo_symbol("  BRK.B  "), "BRK-B")
 
+    def test_internal_whitespace_stripped(self):
+        # An LLM tool call occasionally stutters a space into the ticker;
+        # a ticker never legitimately contains whitespace, so all of it
+        # is removed (not just leading/trailing).
+        self.assertEqual(to_yahoo_symbol("GOO  GL"), "GOOGL")
+        self.assertEqual(to_yahoo_symbol("A A P L"), "AAPL")
+        self.assertEqual(to_yahoo_symbol("BRK . B"), "BRK-B")
+        self.assertEqual(to_yahoo_symbol("NV\tDA"), "NVDA")
+
     def test_no_dot_unchanged(self):
         self.assertEqual(to_yahoo_symbol("AAPL"), "AAPL")
         self.assertEqual(to_yahoo_symbol("NVDA"), "NVDA")

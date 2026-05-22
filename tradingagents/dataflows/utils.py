@@ -26,6 +26,14 @@ _US_CLASS_SHARE_RE = re.compile(r"^[A-Z]+\.[A-Z]$")
 def to_yahoo_symbol(symbol: str) -> str:
     """Rewrite a canonical ticker to the form Yahoo Finance expects.
 
+    All whitespace — leading, trailing, and internal — is removed. A
+    ticker never legitimately contains whitespace, and an LLM emitting a
+    tool-call argument occasionally stutters a space into the symbol
+    string (observed: the model produced ``"GOO  GL"`` for GOOGL, which
+    then failed every downstream data fetch). Stripping it here, on the
+    single normalisation point every data source funnels through, repairs
+    the value transparently before it reaches yfinance / stockstats.
+
     Examples:
         BRK.B    -> BRK-B
         BF.B     -> BF-B
@@ -36,10 +44,11 @@ def to_yahoo_symbol(symbol: str) -> str:
         RDS.AS   -> RDS.AS   (multi-letter suffix -> exchange)
         ^GSPC    -> ^GSPC    (index symbol)
         btc-usd  -> BTC-USD  (already correct form; just uppercased)
+        GOO  GL  -> GOOGL    (LLM whitespace stutter repaired)
     """
     if not isinstance(symbol, str) or not symbol:
         return symbol
-    s = symbol.strip().upper()
+    s = re.sub(r"\s+", "", symbol).upper()
     if _US_CLASS_SHARE_RE.match(s):
         return s.replace(".", "-")
     return s
