@@ -23,6 +23,8 @@ from typing import Any, Callable, Optional, TypeVar
 
 from pydantic import BaseModel
 
+from tradingagents.agents.utils.degeneracy import check_not_degenerate
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
@@ -94,6 +96,10 @@ def invoke_structured_or_freetext(
             result = structured_llm.invoke(prompt)
             rendered = render(result)
             if len(rendered.strip()) >= min_chars:
+                # A degenerate render raises DegenerateOutputError, caught
+                # just below — so the free-text path gets a fresh attempt
+                # (likely a different Gonka executor) before giving up.
+                check_not_degenerate(rendered, agent_name)
                 return rendered
             logger.warning(
                 "%s: structured output rendered to %d chars (<%d); "
@@ -114,4 +120,7 @@ def invoke_structured_or_freetext(
             f"(got {len(content.strip())} chars, threshold {min_chars}). "
             f"Likely upstream stream truncation; runner will retry."
         )
+    # Free-text degeneracy is not recoverable here — let it propagate so
+    # the LangGraph node-level retry re-rolls on a fresh executor.
+    check_not_degenerate(content, agent_name)
     return content

@@ -8,6 +8,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_language_instruction,
 )
+from tradingagents.agents.utils.degeneracy import check_not_degenerate
 from tradingagents.dataflows.config import get_config
 
 
@@ -60,6 +61,9 @@ def create_fundamentals_analyst(llm):
 
         if len(result.tool_calls) == 0:
             report = result.content
+            # Reject repetition-loop / token-salad output so the node
+            # retries on a fresh executor instead of persisting garbage.
+            check_not_degenerate(report, "Fundamentals Analyst")
 
         return {
             "messages": [result],

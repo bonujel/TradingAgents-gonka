@@ -8,32 +8,49 @@ from langgraph.types import RetryPolicy
 
 from tradingagents.agents import *
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.agents.utils.degeneracy import DegenerateOutputError
 from tradingagents.llm_clients.retry import is_transient_llm_error
 
 from .conditional_logic import ConditionalLogic
+
+
+def _is_node_retryable(exc: Exception) -> bool:
+    """Node-level retry predicate.
+
+    Retries transient transport failures (``is_transient_llm_error``,
+    shared with app/runner.py's ticker-level backstop) **plus**
+    ``DegenerateOutputError``.
+
+    The degenerate-output case is retried only here, not at the ticker
+    level: re-running a single node on a fresh executor is cheap, whereas
+    a persistently degenerate backend should fail fast after a few node
+    re-rolls rather than also re-running the whole pipeline. Bounding the
+    cost this way is why ``DegenerateOutputError`` is excluded from
+    ``is_transient_llm_error``.
+    """
+    return is_transient_llm_error(exc) or isinstance(exc, DegenerateOutputError)
 
 
 def _node_retry_policy() -> RetryPolicy:
     """RetryPolicy attached to every graph node.
 
     A transient Gonka/transport failure (peer-closed stream, 5xx, 429, a
-    corrupted SSE chunk, ...) re-runs only the failing node — every prior
-    node's committed state is kept — instead of restarting the whole
-    ticker pipeline. This is the cheap first line of defence; the
-    ticker-level loop in app/runner.py stays as a coarse backstop.
-
-    ``retry_on`` shares ``is_transient_llm_error`` with that backstop so
-    the two layers never disagree on what is recoverable.
+    corrupted SSE chunk, ...) or a degenerate-output rejection re-runs
+    only the failing node — every prior node's committed state is kept —
+    instead of restarting the whole ticker pipeline. This is the cheap
+    first line of defence; the ticker-level loop in app/runner.py stays
+    as a coarse backstop for transport failures only.
 
     Defaults: 3 attempts total, ~2s → 6s backoff with jitter. The attempt
-    count is tunable via ``TRADINGAGENTS_NODE_RETRY_ATTEMPTS``.
+    count is tunable via ``TRADINGAGENTS_NODE_RETRY_ATTEMPTS`` and also
+    caps how many times a degenerate node is re-rolled.
     """
     try:
         attempts = max(1, int(os.environ.get("TRADINGAGENTS_NODE_RETRY_ATTEMPTS", "3")))
     except ValueError:
         attempts = 3
     return RetryPolicy(
-        retry_on=is_transient_llm_error,
+        retry_on=_is_node_retryable,
         max_attempts=attempts,
         initial_interval=2.0,
         backoff_factor=3.0,

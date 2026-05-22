@@ -5,6 +5,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_stock_data,
 )
+from tradingagents.agents.utils.degeneracy import check_not_degenerate
 from tradingagents.dataflows.config import get_config
 
 
@@ -79,6 +80,9 @@ Volume-Based Indicators:
 
         if len(result.tool_calls) == 0:
             report = result.content
+            # Reject repetition-loop / token-salad output so the node
+            # retries on a fresh executor instead of persisting garbage.
+            check_not_degenerate(report, "Market Analyst")
 
         return {
             "messages": [result],

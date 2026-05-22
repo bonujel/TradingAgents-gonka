@@ -6,19 +6,40 @@ whole ticker pipeline. The policy is built by
 exception classifier with app/runner.py's ticker-level backstop.
 """
 
+import httpx
 import pytest
 
-from tradingagents.graph.setup import _node_retry_policy
-from tradingagents.llm_clients.retry import is_transient_llm_error
+from tradingagents.agents.utils.degeneracy import DegenerateOutputError
+from tradingagents.graph.setup import _is_node_retryable, _node_retry_policy
 
 
 @pytest.mark.unit
 class TestNodeRetryPolicy:
-    def test_policy_uses_shared_classifier(self):
-        """retry_on must be the same predicate the runner uses, so the
-        node-level and ticker-level layers never disagree."""
+    def test_policy_uses_node_predicate(self):
         policy = _node_retry_policy()
-        assert policy.retry_on is is_transient_llm_error
+        assert policy.retry_on is _is_node_retryable
+
+    def test_node_predicate_retries_transient_transport_errors(self):
+        """The node predicate must cover everything the ticker-level
+        backstop covers, so transport blips recover at the cheap
+        granularity first."""
+        assert _is_node_retryable(httpx.RemoteProtocolError("peer closed")) is True
+
+    def test_node_predicate_retries_degenerate_output(self):
+        """DegenerateOutputError is retryable at the node level — a
+        re-roll usually lands on a healthy executor."""
+        assert _is_node_retryable(DegenerateOutputError("salad")) is True
+
+    def test_node_predicate_rejects_code_bugs(self):
+        assert _is_node_retryable(KeyError("missing")) is False
+
+    def test_degenerate_output_is_not_ticker_level_retryable(self):
+        """The bounded-cost guarantee: DegenerateOutputError recovers at
+        the node level only. The ticker-level classifier must reject it
+        so a persistently bad backend is not also re-run pipeline-wide."""
+        from tradingagents.llm_clients.retry import is_transient_llm_error
+
+        assert is_transient_llm_error(DegenerateOutputError("salad")) is False
 
     def test_default_attempt_count(self):
         policy = _node_retry_policy()

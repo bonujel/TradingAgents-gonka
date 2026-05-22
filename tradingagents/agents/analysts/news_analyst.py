@@ -5,6 +5,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
 )
+from tradingagents.agents.utils.degeneracy import check_not_degenerate
 from tradingagents.dataflows.config import get_config
 
 
@@ -53,6 +54,9 @@ def create_news_analyst(llm):
 
         if len(result.tool_calls) == 0:
             report = result.content
+            # Reject repetition-loop / token-salad output so the node
+            # retries on a fresh executor instead of persisting garbage.
+            check_not_degenerate(report, "News Analyst")
 
         return {
             "messages": [result],

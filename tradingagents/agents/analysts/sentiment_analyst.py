@@ -27,6 +27,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
 )
+from tradingagents.agents.utils.degeneracy import check_not_degenerate
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 
@@ -87,6 +88,10 @@ def create_sentiment_analyst(llm):
         # call produces the report directly.
         chain = prompt | llm
         result = chain.invoke(state["messages"])
+
+        # Reject repetition-loop / token-salad output so the node retries
+        # on a fresh executor instead of persisting garbage.
+        check_not_degenerate(result.content, "Sentiment Analyst")
 
         return {
             "messages": [result],
