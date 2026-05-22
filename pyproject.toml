@@ -15,8 +15,11 @@ dependencies = [
     "langchain-experimental>=0.3.4",
     "langchain-google-genai>=4.0.0",
     "langchain-openai>=0.3.23",
-    "langgraph>=0.4.8",
-    "langgraph-checkpoint-sqlite>=2.0.0",
+    # Floor is 1.2.0: tradingagents/graph/setup.py passes `retry_policy=`
+    # to StateGraph.add_node, the kwarg name used on langgraph 1.x.
+    # Older releases call it `retry` and reject `retry_policy`.
+    "langgraph>=1.2.0",
+    "langgraph-checkpoint-sqlite>=3.0.0",
     "pandas>=2.3.0",
     "parsel>=1.10.0",
     "pytz>=2025.2",
