@@ -120,6 +120,24 @@ export interface SettingsUpdate {
   max_workers: number;
 }
 
+export interface LoginResponse {
+  token: string;
+  username: string;
+  role: "admin" | "user";
+}
+
+export interface UserRecord {
+  username: string;
+  role: "admin" | "user";
+  created_at: string | null;
+  builtin: boolean;
+}
+
+export interface NewCredential {
+  username: string;
+  password: string;
+}
+
 function buildUrl(base: string, path: string): string {
   if (path.startsWith("http")) return path;
   return `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
@@ -130,10 +148,52 @@ export function useApi() {
   const base = config.public.apiBase as string;
 
   async function request<T>(path: string, opts: FetchOptions<"json"> = {}): Promise<T> {
-    return await $fetch<T>(buildUrl(base, path), opts);
+    const auth = useAuthStore();
+    const headers: Record<string, string> = { ...(opts.headers as Record<string, string>) };
+    if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
+    try {
+      return await $fetch<T>(buildUrl(base, path), { ...opts, headers });
+    } catch (err: unknown) {
+      // A 401 means the token is missing/expired — drop the session and
+      // send the operator back to the login screen. Skip the redirect for
+      // the login call itself so a bad password shows inline instead.
+      const e = err as { response?: { status?: number }; statusCode?: number };
+      const status = e?.response?.status ?? e?.statusCode;
+      if (status === 401 && path !== "/api/auth/login") {
+        auth.clear();
+        if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+          navigateTo("/login");
+        }
+      }
+      throw err;
+    }
   }
 
   return {
+    login: (username: string, password: string) =>
+      request<LoginResponse>("/api/auth/login", {
+        method: "POST",
+        body: { username, password },
+      }),
+    me: () => request<LoginResponse>("/api/auth/me"),
+    changePassword: (oldPassword: string, newPassword: string) =>
+      request<{ ok: boolean }>("/api/auth/change-password", {
+        method: "POST",
+        body: { old_password: oldPassword, new_password: newPassword },
+      }),
+    listUsers: () => request<UserRecord[]>("/api/users"),
+    createUser: (email: string) =>
+      request<NewCredential>("/api/users", { method: "POST", body: { email } }),
+    resetUserPassword: (username: string) =>
+      request<NewCredential>(
+        `/api/users/${encodeURIComponent(username)}/reset-password`,
+        { method: "POST" }
+      ),
+    deleteUser: (username: string) =>
+      request<{ username: string; deleted: boolean }>(
+        `/api/users/${encodeURIComponent(username)}`,
+        { method: "DELETE" }
+      ),
     info: () => request<InfoResponse>("/api/info"),
     getSettings: () => request<SettingsResponse>("/api/settings"),
     putSettings: (body: SettingsUpdate) =>

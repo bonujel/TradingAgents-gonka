@@ -19,7 +19,7 @@
 
     <nav class="flex-1 space-y-1 px-3 py-4 text-sm">
       <NuxtLink
-        v-for="item in items"
+        v-for="item in navItems"
         :key="item.to"
         :to="item.to"
         class="group flex items-center gap-3 rounded-lg px-3 py-2 text-gonka-muted transition hover:bg-gonka-card hover:text-gonka-text"
@@ -52,6 +52,40 @@
         {{ shortModel }}
       </div>
     </div>
+
+    <div class="border-t border-gonka-border p-3">
+      <div class="flex items-center gap-2 px-1">
+        <span
+          class="grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold uppercase"
+          :class="
+            auth.isAdmin
+              ? 'bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-500/30'
+              : 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30'
+          "
+        >
+          {{ initials }}
+        </span>
+        <div class="min-w-0 flex-1 leading-tight">
+          <div class="truncate text-xs font-medium text-gonka-text" :title="auth.username || ''">
+            {{ auth.username || "—" }}
+          </div>
+          <div class="text-[10px] uppercase tracking-wider text-gonka-muted">
+            {{ auth.isAdmin ? "Super admin" : "User" }}
+          </div>
+        </div>
+        <button
+          class="btn btn-ghost px-2 py-1"
+          type="button"
+          title="Sign out"
+          @click="logout"
+        >
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M16 17l5-5-5-5M21 12H9" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+      </div>
+    </div>
   </aside>
 </template>
 
@@ -59,6 +93,7 @@
 import { h } from "vue";
 
 const infoStore = useInfoStore();
+const auth = useAuthStore();
 const info = computed(() => infoStore.info);
 
 const shortModel = computed(() => {
@@ -66,6 +101,46 @@ const shortModel = computed(() => {
   if (!m) return "no model";
   return m.split("/").pop() || m;
 });
+
+const initials = computed(() => {
+  const name = auth.username || "";
+  if (!name) return "?";
+  return name.slice(0, 2).toUpperCase();
+});
+
+async function logout() {
+  auth.clear();
+  await navigateTo("/login");
+}
+
+const accountIcon = () =>
+  h(
+    "svg",
+    { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8 },
+    [
+      h("circle", { cx: "9", cy: "8", r: "3.2" }),
+      h("path", {
+        d: "M3.5 19a5.5 5.5 0 0 1 11 0",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+      h("path", { d: "M17 8h4M19 6v4", "stroke-linecap": "round" }),
+    ]
+  );
+
+const profileIcon = () =>
+  h(
+    "svg",
+    { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8 },
+    [
+      h("circle", { cx: "12", cy: "8", r: "3.4" }),
+      h("path", {
+        d: "M5 20a7 7 0 0 1 14 0",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+    ]
+  );
 
 const items = [
   {
@@ -138,4 +213,13 @@ const items = [
       ),
   },
 ];
+
+// Account Management is super-admin only; Personal Settings is shown to
+// normal users only (the super admin's password rotates on restart).
+const navItems = computed(() => {
+  const extra = auth.isAdmin
+    ? [{ to: "/account", label: "Account Management", icon: accountIcon }]
+    : [{ to: "/profile", label: "Personal Settings", icon: profileIcon }];
+  return [...items, ...extra];
+});
 </script>

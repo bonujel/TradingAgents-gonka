@@ -18,12 +18,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import db, schedule_store, scheduler_thread, tasks
+from . import auth, db, schedule_store, scheduler_thread, tasks
 from .settings_store import (
     MODEL_OPTIONS,
     load_settings,
@@ -41,6 +41,11 @@ app = FastAPI(
     title="TradingAgents · Gonka API",
     version="1.0.0",
     description="Backend for the Nuxt operator dashboard.",
+    # App-level dependency: every /api/ route except the public ones
+    # (login, health) requires a valid bearer token. Raising HTTPException
+    # here — rather than in a middleware — keeps CORS headers on the 401,
+    # so the browser can actually read the response.
+    dependencies=[Depends(auth.require_authenticated)],
 )
 
 app.add_middleware(
@@ -55,6 +60,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _bootstrap() -> None:
     db.init_db()
+    auth.init_auth()
     scheduler_thread.reload_schedule()
 
 
@@ -91,6 +97,20 @@ class ScheduleUpdate(BaseModel):
     tickers: list[str] = Field(default_factory=list)
     pause_clears_pending: Optional[bool] = None
     clear_pending: bool = False
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class CreateUserRequest(BaseModel):
+    email: str = Field(min_length=3)
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=6)
 
 
 # ─── Info / settings ──────────────────────────────────────────────────────
@@ -345,3 +365,81 @@ def put_schedule(body: ScheduleUpdate) -> dict[str, Any]:
     schedule_store.save_schedule(cfg)
     scheduler_thread.reload_schedule()
     return _schedule_payload()
+
+
+# ─── Authentication ───────────────────────────────────────────────────────
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest) -> dict[str, Any]:
+    role = auth.verify_credentials(body.username, body.password)
+    if not role:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    username = body.username.strip()
+    if username != auth.SA_USERNAME:
+        username = username.lower()
+    token = auth.make_token(username, role)
+    return {"token": token, "username": username, "role": role}
+
+
+@app.get("/api/auth/me")
+def whoami(user: dict = Depends(auth.current_user)) -> dict[str, Any]:
+    return {"username": user["u"], "role": user["r"]}
+
+
+@app.post("/api/auth/change-password")
+def change_password(
+    body: ChangePasswordRequest,
+    user: dict = Depends(auth.current_user),
+) -> dict[str, Any]:
+    username = user["u"]
+    if username == auth.SA_USERNAME:
+        raise HTTPException(
+            status_code=400,
+            detail="The super-admin password rotates on restart and cannot be changed here.",
+        )
+    if not auth.verify_credentials(username, body.old_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    try:
+        auth.set_password(username, body.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+# ─── User management (super admin only) ───────────────────────────────────
+
+
+@app.get("/api/users", dependencies=[Depends(auth.require_admin)])
+def list_users() -> list[dict[str, Any]]:
+    return auth.list_users()
+
+
+@app.post("/api/users", status_code=201, dependencies=[Depends(auth.require_admin)])
+def create_user(body: CreateUserRequest) -> dict[str, Any]:
+    try:
+        password = auth.create_user(body.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"username": body.email.strip().lower(), "password": password}
+
+
+@app.post(
+    "/api/users/{username}/reset-password",
+    dependencies=[Depends(auth.require_admin)],
+)
+def reset_user_password(username: str) -> dict[str, Any]:
+    try:
+        password = auth.reset_password(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"username": username.strip().lower(), "password": password}
+
+
+@app.delete("/api/users/{username}", dependencies=[Depends(auth.require_admin)])
+def remove_user(username: str) -> dict[str, Any]:
+    try:
+        auth.delete_user(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"username": username.strip().lower(), "deleted": True}
