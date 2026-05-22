@@ -6,10 +6,12 @@ This file exercises the StructuredOutputEmpty marker contract added in
 dev_notes/gonka-structured-output-resilience-design.md (Component 4).
 """
 
+import logging
+
 import pytest
 from openai import APIError, BadRequestError
 
-from app.runner import _is_retryable
+from app.runner import _count_node_retries, _is_retryable, _NodeRetryCounter
 from tradingagents.agents.utils.structured import StructuredOutputEmpty
 
 
@@ -73,3 +75,35 @@ class TestJsonDecodeApiErrorIsRetryable:
         exc = BadRequestError.__new__(BadRequestError)
         Exception.__init__(exc, "bad: line 1 column 2 (char 1)")
         assert _is_retryable(exc) is False
+
+
+@pytest.mark.unit
+class TestNodeRetryCounter:
+    """run_one taps the langgraph retry logger so a persisted failure can
+    honestly report node-level retries — the ones the ticker-level
+    counter cannot see."""
+
+    @staticmethod
+    def _record(msg: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            "langgraph.pregel._retry", logging.INFO, __file__, 0, msg, None, None
+        )
+
+    def test_counts_only_langgraph_retry_records(self):
+        counter = _NodeRetryCounter()
+        # The exact prefix LangGraph emits on every node retry.
+        counter.emit(self._record(
+            "Retrying task Market Analyst after 2.00 seconds (attempt 2) after X"
+        ))
+        counter.emit(self._record(
+            "Retrying task News Analyst after 6.00 seconds (attempt 3) after Y"
+        ))
+        counter.emit(self._record("Graph step 5 complete"))  # unrelated
+        assert counter.count == 2
+
+    def test_context_manager_attaches_and_detaches(self):
+        lg = logging.getLogger("langgraph.pregel._retry")
+        before = list(lg.handlers)
+        with _count_node_retries() as counter:
+            assert counter in lg.handlers
+        assert lg.handlers == before  # handler removed on exit

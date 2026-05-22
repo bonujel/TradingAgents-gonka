@@ -78,9 +78,25 @@ class TestIsDegenerateText:
 
 @pytest.mark.unit
 class TestCheckNotDegenerate:
-    def test_healthy_text_does_not_raise(self):
+    """Enforcement is gated by TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT."""
+
+    def test_disabled_by_default_does_not_raise_on_garbage(self, monkeypatch):
+        """Default (flag unset): degenerate output is tolerated — the
+        node is not failed, matching the pre-detector behaviour."""
+        monkeypatch.delenv("TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT", raising=False)
+        check_not_degenerate("you are a user, " * 400, "News Analyst")  # no raise
+
+    def test_enabled_healthy_text_does_not_raise(self, monkeypatch):
+        monkeypatch.setenv("TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT", "1")
         check_not_degenerate(_HEALTHY_REPORT, "Market Analyst")  # no raise
 
-    def test_degenerate_text_raises_with_agent_name(self):
+    def test_enabled_degenerate_text_raises_with_agent_name(self, monkeypatch):
+        monkeypatch.setenv("TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT", "1")
         with pytest.raises(DegenerateOutputError, match="News Analyst"):
             check_not_degenerate("you are a user, " * 400, "News Analyst")
+
+    def test_flag_accepts_common_truthy_spellings(self, monkeypatch):
+        for value in ("1", "true", "TRUE", "yes", "on"):
+            monkeypatch.setenv("TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT", value)
+            with pytest.raises(DegenerateOutputError):
+                check_not_degenerate("的" * 900, "Market Analyst")

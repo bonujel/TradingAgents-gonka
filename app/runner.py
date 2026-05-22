@@ -14,8 +14,9 @@ import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -49,6 +50,43 @@ logger = logging.getLogger(__name__)
 # module-local alias for readability at the call site.
 
 _is_retryable = is_transient_llm_error
+
+
+class _NodeRetryCounter(logging.Handler):
+    """Counts LangGraph node-level retries by tapping its retry logger.
+
+    Node retries happen inside ``graph.invoke`` and are opaque to the
+    caller — the only seam to observe them is the
+    ``langgraph.pregel._retry`` logger, which emits
+    ``"Retrying task <name> after <s>s (attempt N) ..."`` on each retry.
+    Counting those records lets ``run_one`` report honestly how hard a
+    row was tried, including the retries the ``[ticker-retries=N]``
+    counter cannot see. Coupled to that one log prefix; if LangGraph
+    rewords it the count silently reads zero — the run still behaves
+    correctly, only the diagnostic number is lost.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if record.getMessage().startswith("Retrying task"):
+                self.count += 1
+        except Exception:  # noqa: BLE001 — a logging handler must never raise
+            pass
+
+
+@contextmanager
+def _count_node_retries() -> Iterator[_NodeRetryCounter]:
+    counter = _NodeRetryCounter()
+    lg_logger = logging.getLogger("langgraph.pregel._retry")
+    lg_logger.addHandler(counter)
+    try:
+        yield counter
+    finally:
+        lg_logger.removeHandler(counter)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -150,10 +188,16 @@ def run_one(
     ``propagate()``; reusing a dirtied graph would carry partial-state
     side effects into the next attempt and defeat the point of retrying.
 
-    Only the final exception is persisted to the DB, prefixed with
-    ``[retries=N]`` so dashboard scans can see at a glance how hard the row
-    was tried. The (ticker, trade_date) row is UPSERT'd so a later successful
-    retry overwrites any earlier failure row from the same call.
+    This ticker-level loop is only the coarse backstop. Most transient
+    failures are already recovered one layer down by the LangGraph
+    node-level RetryPolicy inside ``propagate()`` — so by the time an
+    exception reaches here, the node-level retries are *already
+    exhausted*. The persisted error is prefixed with
+    ``[ticker-retries=N node-retries=M]`` so a dashboard scan shows both:
+    M proves the row was re-rolled at the node level even when N is 0
+    (e.g. degenerate output, which is intentionally not ticker-retried).
+    The (ticker, trade_date) row is UPSERT'd so a later successful retry
+    overwrites any earlier failure row from the same call.
 
     Returns a small dict describing the outcome so the caller can summarise
     the batch without re-querying the DB.
@@ -173,60 +217,72 @@ def run_one(
     last_tb: str = ""
     attempt = 0
 
-    for attempt in range(total_attempts):
-        # Honour a caller-supplied graph only on the very first attempt; every
-        # retry builds its own clean graph (see docstring for the rationale).
-        ta = graph if (attempt == 0 and graph is not None) \
-            else TradingAgentsGraph(debug=False, config=config)
+    # The counter spans every ticker attempt, so node-level retries are
+    # tallied across the whole call — not reset per ticker-level retry.
+    with _count_node_retries() as node_retries:
+        for attempt in range(total_attempts):
+            # Honour a caller-supplied graph only on the very first attempt;
+            # every retry builds its own clean graph (see docstring).
+            ta = graph if (attempt == 0 and graph is not None) \
+                else TradingAgentsGraph(debug=False, config=config)
 
-        try:
-            if attempt == 0:
-                logger.info("[%s] entering propagate (multi-agent debate + tools)", ticker)
-            else:
-                logger.info(
-                    "[%s] retry %d/%d (fresh graph)", ticker, attempt, max_retries,
+            try:
+                if attempt == 0:
+                    logger.info("[%s] entering propagate (multi-agent debate + tools)", ticker)
+                else:
+                    logger.info(
+                        "[%s] retry %d/%d (fresh graph)", ticker, attempt, max_retries,
+                    )
+                final_state, _signal = ta.propagate(ticker, trade_date)
+                logger.info("[%s] propagate complete on attempt %d", ticker, attempt + 1)
+                final_decision = final_state.get("final_trade_decision") or ""
+                rating = parse_rating(final_decision) if final_decision else None
+                db.upsert_decision(
+                    ticker=ticker,
+                    trade_date=trade_date,
+                    rating=rating,
+                    final_decision=final_decision,
+                    reports=_extract_reports(final_state),
+                    model_provider=config.get("llm_provider"),
+                    deep_model=config.get("deep_think_llm"),
+                    quick_model=config.get("quick_think_llm"),
                 )
-            final_state, _signal = ta.propagate(ticker, trade_date)
-            logger.info("[%s] propagate complete on attempt %d", ticker, attempt + 1)
-            final_decision = final_state.get("final_trade_decision") or ""
-            rating = parse_rating(final_decision) if final_decision else None
-            db.upsert_decision(
-                ticker=ticker,
-                trade_date=trade_date,
-                rating=rating,
-                final_decision=final_decision,
-                reports=_extract_reports(final_state),
-                model_provider=config.get("llm_provider"),
-                deep_model=config.get("deep_think_llm"),
-                quick_model=config.get("quick_think_llm"),
-            )
-            return {"ticker": ticker, "ok": True, "rating": rating, "retries": attempt}
-        except Exception as exc:
-            # Capture traceback inside the except block — sys.exc_info() is
-            # only populated here, and we need the text below the loop.
-            last_exc = exc
-            last_tb = traceback.format_exc(limit=4)
-            retryable = _is_retryable(exc)
-            if retryable and attempt < max_retries:
-                delay = _backoff_seconds(attempt + 1)
-                logger.warning(
-                    "[%s] attempt %d/%d failed (%s: %s); sleeping %.1fs before retry",
-                    ticker, attempt + 1, total_attempts,
-                    type(exc).__name__, exc, delay,
-                )
-                time.sleep(delay)
-                continue
-            # Non-retryable or out of retries — fall through to persist failure.
-            break
+                return {
+                    "ticker": ticker, "ok": True, "rating": rating,
+                    "retries": attempt, "node_retries": node_retries.count,
+                }
+            except Exception as exc:
+                # Capture traceback inside the except block — sys.exc_info()
+                # is only populated here, and we need the text below.
+                last_exc = exc
+                last_tb = traceback.format_exc(limit=4)
+                retryable = _is_retryable(exc)
+                if retryable and attempt < max_retries:
+                    delay = _backoff_seconds(attempt + 1)
+                    logger.warning(
+                        "[%s] attempt %d/%d failed (%s: %s); sleeping %.1fs before retry",
+                        ticker, attempt + 1, total_attempts,
+                        type(exc).__name__, exc, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                # Non-retryable or out of retries — persist the failure.
+                break
 
-    # All attempts exhausted (or hit a non-retryable exception).
+    # All attempts exhausted (or hit a non-retryable exception). Both retry
+    # counts are persisted: ticker-retries is the whole-pipeline retry loop
+    # above; node-retries is how many times LangGraph re-ran an individual
+    # node inside propagate(). A degenerate-output failure shows
+    # ticker-retries=0 (excluded from the ticker loop by design) but a
+    # non-zero node-retries — the node *was* re-rolled before giving up.
     assert last_exc is not None  # loop must have entered the except branch
     logger.exception(
-        "Run failed for %s on %s after %d attempt(s)",
-        ticker, trade_date, attempt + 1,
+        "Run failed for %s on %s after %d ticker attempt(s), %d node retr(ies)",
+        ticker, trade_date, attempt + 1, node_retries.count,
     )
     error_msg = (
-        f"[retries={attempt}] {type(last_exc).__name__}: {last_exc}\n{last_tb}"
+        f"[ticker-retries={attempt} node-retries={node_retries.count}] "
+        f"{type(last_exc).__name__}: {last_exc}\n{last_tb}"
     )
     db.upsert_decision(
         ticker=ticker,
@@ -239,7 +295,10 @@ def run_one(
         quick_model=config.get("quick_think_llm"),
         error=error_msg,
     )
-    return {"ticker": ticker, "ok": False, "error": str(last_exc), "retries": attempt}
+    return {
+        "ticker": ticker, "ok": False, "error": str(last_exc),
+        "retries": attempt, "node_retries": node_retries.count,
+    }
 
 
 def _env_max_workers(default: int = 1) -> int:

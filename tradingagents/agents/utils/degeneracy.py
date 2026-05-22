@@ -11,16 +11,22 @@ This module spots that garbage from the finalized report text so the
 caller can raise :class:`DegenerateOutputError` and let the LangGraph
 node-level retry re-roll on a different executor.
 
-Retry-budget note: ``DegenerateOutputError`` is retryable at the
-**node** level only (``tradingagents/graph/setup.py``), bounded by that
-node's ``RetryPolicy.max_attempts``. It is deliberately excluded from
-the **ticker**-level retry in ``app/runner.py`` so a persistently bad
-backend fails fast after a few node re-rolls instead of also re-running
-the whole pipeline.
+Enforcement is **opt-in and off by default** — see ``_detection_enabled``.
+On a bad backend day the detector turns silently-degraded reports into
+hard run failures, which is noisier than the previous behaviour, so it
+is gated behind ``TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT=1``.
+
+Retry-budget note (applies when enforcement is on): ``DegenerateOutputError``
+is retryable at the **node** level only (``tradingagents/graph/setup.py``),
+bounded by that node's ``RetryPolicy.max_attempts``. It is deliberately
+excluded from the **ticker**-level retry in ``app/runner.py`` so a
+persistently bad backend fails fast after a few node re-rolls instead of
+also re-running the whole pipeline.
 """
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 
 
@@ -30,6 +36,26 @@ class DegenerateOutputError(RuntimeError):
     Node-level retryable; not ticker-level retryable — see the module
     docstring for the retry-budget rationale.
     """
+
+
+# Enforcement is opt-in. Turning a silently-degraded report into a hard
+# DegenerateOutputError (retried, then failing the run) spiked the
+# observed failure rate when the Gonka backend was having a bad day —
+# previously that garbage was just persisted. Disabled by default;
+# re-enable with TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT=1 when backend
+# output quality is being actively investigated.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _detection_enabled() -> bool:
+    """Whether ``check_not_degenerate`` actually enforces (read per call
+    so the env var can be toggled without reimporting)."""
+    return (
+        os.environ.get("TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT", "0")
+        .strip()
+        .lower()
+        in _TRUTHY
+    )
 
 
 # Only sufficiently long output is judged. A real degeneration loop runs
@@ -101,10 +127,18 @@ def is_degenerate_text(text: str | None) -> bool:
 
 
 def check_not_degenerate(text: str | None, agent_name: str) -> None:
-    """Raise :class:`DegenerateOutputError` when ``text`` is degenerate."""
+    """Raise :class:`DegenerateOutputError` when ``text`` is degenerate.
+
+    A no-op unless ``TRADINGAGENTS_DETECT_DEGENERATE_OUTPUT`` is truthy —
+    see ``_detection_enabled``. When enforcing, the message is purely
+    factual: it does not promise a retry, because the same string is
+    what gets persisted if every node-level re-roll is exhausted. Retry
+    semantics are the caller's concern (see ``tradingagents/graph/setup.py``).
+    """
+    if not _detection_enabled():
+        return
     if is_degenerate_text(text):
         raise DegenerateOutputError(
             f"{agent_name}: model produced degenerate output "
-            f"({len((text or '').strip())} chars of repetition / token "
-            f"salad). Retrying the node on a fresh executor."
+            f"({len((text or '').strip())} chars of repetition / token salad)"
         )
