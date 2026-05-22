@@ -8,7 +8,7 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
-from .utils import safe_ticker_component
+from .utils import safe_ticker_component, to_yahoo_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,11 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """
     # Reject ticker values that would escape the cache directory when
     # interpolated into the cache filename (e.g. ``../../tmp/x``).
-    safe_symbol = safe_ticker_component(symbol)
+    # Yahoo expects 'BRK-B' (dash) not 'BRK.B' (dot) for class shares;
+    # normalising before both the cache key and the fetch keeps the two
+    # sides in sync so we don't cache an empty result under the wrong key.
+    yahoo_symbol = to_yahoo_symbol(symbol)
+    safe_symbol = safe_ticker_component(yahoo_symbol)
 
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
@@ -75,7 +79,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
     else:
         data = yf_retry(lambda: yf.download(
-            symbol,
+            yahoo_symbol,
             start=start_str,
             end=end_str,
             multi_level_index=False,

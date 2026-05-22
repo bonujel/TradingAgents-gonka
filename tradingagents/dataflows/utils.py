@@ -13,6 +13,38 @@ SavePathType = Annotated[str, "File path to save data. If None, data is not save
 _TICKER_PATH_RE = re.compile(r"^[A-Za-z0-9._\-\^]+$")
 
 
+# Yahoo Finance uses '-' for US class shares (BRK-B, BF-B, HEI-A) but '.'
+# for exchange suffixes (7203.T, 2330.TW, RDS.AS). Canonical industry
+# notation uses '.' for both, so requests like ``yf.Ticker("BRK.B")``
+# return empty and log "possibly delisted; no timezone found". We detect
+# the US-class-share pattern (all letters before the dot, single letter
+# after) and rewrite '.' to '-'. Multi-letter suffixes and digit-prefixed
+# tickers are left alone because their '.' is genuinely an exchange suffix.
+_US_CLASS_SHARE_RE = re.compile(r"^[A-Z]+\.[A-Z]$")
+
+
+def to_yahoo_symbol(symbol: str) -> str:
+    """Rewrite a canonical ticker to the form Yahoo Finance expects.
+
+    Examples:
+        BRK.B    -> BRK-B
+        BF.B     -> BF-B
+        HEI.A    -> HEI-A
+        AAPL     -> AAPL     (no dot)
+        7203.T   -> 7203.T   (digits before dot -> exchange suffix)
+        2330.TW  -> 2330.TW  (multi-letter suffix -> exchange)
+        RDS.AS   -> RDS.AS   (multi-letter suffix -> exchange)
+        ^GSPC    -> ^GSPC    (index symbol)
+        btc-usd  -> BTC-USD  (already correct form; just uppercased)
+    """
+    if not isinstance(symbol, str) or not symbol:
+        return symbol
+    s = symbol.strip().upper()
+    if _US_CLASS_SHARE_RE.match(s):
+        return s.replace(".", "-")
+    return s
+
+
 def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
     """Validate ``value`` is safe to interpolate into a filesystem path.
 

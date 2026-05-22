@@ -6,7 +6,7 @@ import yfinance as yf
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-from .utils import safe_strptime
+from .utils import safe_strptime, to_yahoo_symbol
 
 from .config import get_config
 from .stockstats_utils import yf_retry
@@ -71,7 +71,7 @@ def get_news_yfinance(
     """
     article_limit = get_config()["news_article_limit"]
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(to_yahoo_symbol(ticker))
         news = yf_retry(lambda: stock.get_news(count=article_limit))
 
         if not news:
