@@ -224,3 +224,7 @@ __marimo__/
 
 # Gonka CLI binaries — large platform-specific artifacts, download separately
 .gonka-tools/
+
+# Local run logs written by start.sh
+log-back.log
+log-front.log

@@ -3,8 +3,7 @@
     <header>
       <h2 class="text-2xl font-semibold tracking-tight text-white">Settings</h2>
       <p class="mt-1 text-sm text-gonka-muted">
-        Connection mode, credentials, and model selection. Stored at
-        <code class="font-mono text-emerald-300">~/.tradingagents/app/settings.json</code>.
+        Connection mode, credentials, and model selection.
       </p>
     </header>
 
