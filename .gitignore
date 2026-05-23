@@ -228,3 +228,8 @@ __marimo__/
 # Local run logs written by start.sh
 log-back.log
 log-front.log
+
+# Claude Code CLI internal state (per-session lock + cache); not part
+# of the project, created at $REPO_ROOT/.claude/ by the Claude Code
+# harness when tools like ScheduleWakeup run.
+.claude/
