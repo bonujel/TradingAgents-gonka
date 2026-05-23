@@ -47,10 +47,6 @@ _VALUE_ERROR_MARKERS: tuple[str, ...] = (
     # An empty stream is almost always the tail of an upstream disconnect
     # that did not surface as RemoteProtocolError.
     "No generations found in stream",
-    # StructuredOutputEmpty from tradingagents/agents/utils/structured.py —
-    # Trader / RM / PM produced no usable content, typically from upstream
-    # stream truncation.
-    "no usable content from structured output",
 )
 
 # A bare APIError whose message is a JSON decode failure means the openai

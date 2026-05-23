@@ -1,29 +1,23 @@
 """Portfolio Manager: synthesises the risk-analyst debate into the final decision.
 
-Uses LangChain's ``with_structured_output`` so the LLM produces a typed
-``PortfolioDecision`` directly, in a single call.  The result is rendered
-back to markdown for storage in ``final_trade_decision`` so memory log,
-CLI display, and saved reports continue to consume the same shape they do
-today.  When a provider does not expose structured output, the agent falls
-back gracefully to free-text generation.
+Emits free-text prose in a strict canonical shape. The previous structured
+(json_schema) path was removed: Gonka's vLLM caps json_schema completions
+at ~3072 tokens, which made every structured attempt fail length-limit on
+Kimi-K2.6 (run 33). The prompt now demands a fixed ``**Rating**: X`` /
+``**Executive Summary**:`` / ``**Investment Thesis**:`` shape so the
+downstream consumers (memory log, signal processor, runner) can extract
+the rating via ``tradingagents.agents.utils.rating.parse_rating``.
 """
 
 from __future__ import annotations
 
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
 
 
 def create_portfolio_manager(llm):
-    structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
-
     def portfolio_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
 
@@ -61,15 +55,26 @@ def create_portfolio_manager(llm):
 
 ---
 
+**Required Output Format** (use these exact headers, in this order):
+
+**Rating**: <one of Buy / Overweight / Hold / Underweight / Sell>
+
+**Executive Summary**: <2-4 sentences covering entry strategy, sizing, key risk levels, and time horizon>
+
+**Investment Thesis**: <detailed reasoning anchored in specific evidence from the analysts' debate; incorporate prior lessons if any are referenced in the context above>
+
+You MAY include these optional fields below the thesis when warranted:
+
+**Price Target**: <number in the instrument's quote currency, e.g. 215.0>
+
+**Time Horizon**: <e.g. 3-6 months>
+
+The first line of your response MUST begin with ``**Rating**:`` followed by exactly one of the five tier names. Do not preface it with any other text or label. Do not use ``Recommendation:``, ``Final Rating:``, or any other variant — the literal label ``**Rating**:`` is required.
+
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
 
-        final_trade_decision = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            prompt,
-            render_pm_decision,
-            "Portfolio Manager",
-        )
+        response = llm.invoke(prompt)
+        final_trade_decision = response.content if hasattr(response, "content") else str(response)
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,

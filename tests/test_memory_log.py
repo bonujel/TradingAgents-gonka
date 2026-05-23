@@ -5,7 +5,6 @@ import pandas as pd
 from unittest.mock import MagicMock, patch
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
 from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.propagation import Propagator
@@ -83,22 +82,28 @@ def _make_pm_state(past_context=""):
     }
 
 
-def _structured_pm_llm(captured: dict, decision: PortfolioDecision | None = None):
-    """Build a MagicMock LLM whose with_structured_output binding captures the
-    prompt and returns a real PortfolioDecision (so render_pm_decision works).
+_DEFAULT_PM_FREETEXT = (
+    "**Rating**: Hold\n\n"
+    "**Executive Summary**: Hold the position; await catalyst.\n\n"
+    "**Investment Thesis**: Balanced view; neither side carried the debate."
+)
+
+
+def _freetext_pm_llm(captured: dict, content: str = _DEFAULT_PM_FREETEXT):
+    """Build a MagicMock LLM that captures the rendered prompt string and
+    returns a MagicMock-like message with ``content`` set to ``content``.
+
+    The Portfolio Manager no longer takes a structured-output path; it
+    simply calls ``llm.invoke(prompt)`` and reads ``response.content``.
+    The free-text shape returned here matches the canonical headers the
+    agent prompt instructs the model to emit.
     """
-    if decision is None:
-        decision = PortfolioDecision(
-            rating=PortfolioRating.HOLD,
-            executive_summary="Hold the position; await catalyst.",
-            investment_thesis="Balanced view; neither side carried the debate.",
-        )
-    structured = MagicMock()
-    structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or decision
-    )
     llm = MagicMock()
-    llm.with_structured_output.return_value = structured
+    response = MagicMock()
+    response.content = content
+    llm.invoke.side_effect = lambda prompt: (
+        captured.__setitem__("prompt", prompt) or response
+    )
     return llm
 
 
@@ -678,7 +683,7 @@ class TestPortfolioManagerInjection:
 
     def test_pm_prompt_includes_past_context(self):
         captured = {}
-        llm = _structured_pm_llm(captured)
+        llm = _freetext_pm_llm(captured)
         pm_node = create_portfolio_manager(llm)
         state = _make_pm_state(past_context="[2026-01-05 | NVDA | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
         pm_node(state)
@@ -688,49 +693,53 @@ class TestPortfolioManagerInjection:
     def test_pm_no_past_context_no_section(self):
         """PM prompt omits the lessons section entirely when past_context is empty."""
         captured = {}
-        llm = _structured_pm_llm(captured)
+        llm = _freetext_pm_llm(captured)
         pm_node = create_portfolio_manager(llm)
         state = _make_pm_state(past_context="")
         pm_node(state)
         assert "Lessons from prior decisions" not in captured["prompt"]
 
-    def test_pm_returns_rendered_markdown_with_rating(self):
-        """The structured PortfolioDecision is rendered to markdown that
-        downstream consumers (memory log, signal processor, CLI display)
-        can parse without any extra LLM call."""
+    def test_pm_prompt_demands_canonical_rating_header(self):
+        """The PM prompt must instruct the model to emit ``**Rating**:`` as
+        the first line so ``parse_rating`` reliably recovers the rating."""
         captured = {}
-        decision = PortfolioDecision(
-            rating=PortfolioRating.OVERWEIGHT,
-            executive_summary="Build position gradually over the next two weeks.",
-            investment_thesis="AI capex cycle remains intact; institutional flows constructive.",
-            price_target=215.0,
-            time_horizon="3-6 months",
+        llm = _freetext_pm_llm(captured)
+        pm_node = create_portfolio_manager(llm)
+        pm_node(_make_pm_state())
+        assert "**Rating**:" in captured["prompt"]
+        assert "**Executive Summary**:" in captured["prompt"]
+        assert "**Investment Thesis**:" in captured["prompt"]
+        for tier in ("Buy", "Overweight", "Hold", "Underweight", "Sell"):
+            assert f"**{tier}**" in captured["prompt"]
+
+    def test_pm_returns_freetext_with_canonical_rating_header(self):
+        """When the model emits the demanded shape, the PM node passes the
+        prose through verbatim; downstream consumers (memory log, signal
+        processor, CLI display) recover the rating via parse_rating."""
+        plain_response = (
+            "**Rating**: Overweight\n\n"
+            "**Executive Summary**: Build position gradually over the next two weeks.\n\n"
+            "**Investment Thesis**: AI capex cycle remains intact; institutional flows constructive.\n\n"
+            "**Price Target**: 215.0\n\n"
+            "**Time Horizon**: 3-6 months"
         )
-        llm = _structured_pm_llm(captured, decision)
+        captured = {}
+        llm = _freetext_pm_llm(captured, plain_response)
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
-        md = result["final_trade_decision"]
-        assert "**Rating**: Overweight" in md
-        assert "**Executive Summary**: Build position gradually" in md
-        assert "**Investment Thesis**: AI capex cycle" in md
-        assert "**Price Target**: 215.0" in md
-        assert "**Time Horizon**: 3-6 months" in md
+        assert result["final_trade_decision"] == plain_response
 
-    def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
-        """If a provider does not support with_structured_output, the agent
-        falls back to a plain invoke and returns whatever prose the model
-        produced, so the pipeline never blocks."""
-        # Keep this at >= 80 chars (the threshold enforced in
-        # tradingagents/agents/utils/structured.py:_MIN_RENDERED_CHARS); a
-        # too-short fallback now raises StructuredOutputEmpty by design.
+    def test_pm_passes_through_arbitrary_freetext(self):
+        """Even when the model deviates from the demanded shape, the PM
+        node does not transform the response — parse_rating handles
+        deviation downstream."""
         plain_response = (
-            "**Rating**: Sell\n\n"
-            "Exit ahead of guidance: margin trajectory deteriorating, "
-            "no near-term catalyst, downside risk unbalanced."
+            "After weighing the analysts' debate, my final call is Sell — "
+            "margin trajectory is deteriorating with no near-term catalyst, "
+            "and the downside risk is unbalanced versus the upside."
         )
-        llm = MagicMock()
-        llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
-        llm.invoke.return_value = MagicMock(content=plain_response)
+        captured = {}
+        llm = _freetext_pm_llm(captured, plain_response)
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
         assert result["final_trade_decision"] == plain_response

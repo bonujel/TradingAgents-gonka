@@ -27,7 +27,6 @@ dispatch keep working unchanged downstream.
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from typing import Any, Optional
@@ -85,86 +84,6 @@ _GENERATION_DEFAULTS = {"max_tokens": 8192}
 _ROUTER_BASE_URL = "https://api.gonkascan.com/v1"
 
 
-def _inline_schema_refs(schema: dict) -> dict:
-    """Return ``schema`` with every ``$ref`` inlined and ``$defs`` removed.
-
-    Pydantic v2 emits enum and nested-model definitions under ``$defs`` and
-    points at them with ``$ref``. Gonka's gateway rejects any json_schema
-    that still carries ``$defs`` ("schema reference keyword is forbidden"),
-    so a structured-output schema must be made fully self-contained before
-    it is sent as a ``response_format``.
-    """
-    schema = copy.deepcopy(schema)
-    defs = schema.pop("$defs", {})
-
-    def deref(node: Any) -> Any:
-        if isinstance(node, dict):
-            ref = node.get("$ref")
-            if ref is not None:
-                target = deref(copy.deepcopy(defs.get(ref.split("/")[-1], {})))
-                # Keep any sibling keys placed next to the $ref.
-                return {**target, **{k: v for k, v in node.items() if k != "$ref"}}
-            return {k: deref(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [deref(item) for item in node]
-        return node
-
-    return deref(schema)
-
-
-def _json_schema_response_format(schema: Any) -> dict:
-    """Build an OpenAI ``response_format`` block for a Pydantic schema."""
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": getattr(schema, "__name__", "StructuredOutput"),
-            "strict": True,
-            "schema": _inline_schema_refs(schema.model_json_schema()),
-        },
-    }
-
-
-class _GonkaJsonSchemaRunnable:
-    """Stateless structured-output runnable for Gonka backends.
-
-    Every ``invoke`` is one independent ``response_format=json_schema``
-    request. vLLM's guided decoding constrains the completion to the
-    schema server-side; unlike tool-calling it does **not** require the
-    executor to have been started with ``--enable-auto-tool-choice`` /
-    ``--tool-call-parser`` — flags that are inconsistently configured
-    across Gonka's decentralised executor fleet, which made the old
-    function_calling path "sometimes work, sometimes not".
-
-    There is deliberately **no process-level mode cache**. In a
-    decentralised fan-out every request may land on a different executor,
-    so one request's failure carries no information about the next;
-    caching a "downgrade" would poison requests that would have
-    succeeded. A failed json_schema call is handled per-call by the
-    caller (``invoke_structured_or_freetext``: retry once, then free
-    text), with no state surviving the call.
-    """
-
-    def __init__(self, host: Any, schema: Any) -> None:
-        self._host = host
-        self._schema = schema
-        self._response_format = _json_schema_response_format(schema)
-
-    def invoke(self, prompt: Any, *args: Any, **kwargs: Any) -> Any:
-        bound = self._host.bind(response_format=self._response_format)
-        message = bound.invoke(prompt, *args, **kwargs)
-        content = getattr(message, "content", message)
-        if isinstance(content, list):
-            # Multimodal content blocks — concatenate the text parts.
-            content = "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict)
-            )
-        # An empty / truncated / non-conforming completion raises
-        # pydantic ValidationError here; the caller catches it.
-        return self._schema.model_validate_json(content or "")
-
-
 class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
     """vLLM-aware ChatOpenAI subclass for Gonka backends.
 
@@ -189,6 +108,18 @@ class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
     message whose content stripped to empty into ``content=None`` (which the
     SDK turns into JSON ``null`` — the form vLLM accepts). Non-assistant
     roles and assistant messages with real content are left untouched.
+
+    Structured-output (``with_structured_output``) is intentionally NOT
+    overridden here. The three decision-making agents (Research Manager,
+    Portfolio Manager, Trader) used to take a json_schema path, but Gonka's
+    vLLM caps json_schema completions at ~3072 tokens — Kimi-K2.6's
+    reasoning + JSON for those agents exceeds that limit, so every
+    structured attempt failed length-limit and fell back to free text.
+    The agents now emit free-text prose directly in a canonical shape
+    that ``tradingagents.agents.utils.rating.parse_rating`` extracts the
+    rating from. No code in this tree calls ``with_structured_output`` on
+    a Gonka client, so we leave the langchain-openai default behaviour
+    untouched for any future caller that wants it.
     """
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
@@ -202,18 +133,6 @@ class GonkaStreamSafeChatOpenAI(NormalizedChatOpenAI):
             if isinstance(content, str) and content.strip() == "":
                 message["content"] = None
         return payload
-
-    def with_structured_output(self, schema, *, method=None, **kwargs):
-        """Return a stateless json_schema structured-output runnable.
-
-        json_schema is the sole structured-output path for Gonka.
-        function_calling proved unreliable on the decentralised executor
-        fleet — it depends on per-executor vLLM tool-calling flags that
-        operators configure inconsistently — whereas json_schema rides
-        vLLM's guided decoding, which is on by default. The ``method``
-        argument is accepted for API compatibility but ignored.
-        """
-        return _GonkaJsonSchemaRunnable(host=self, schema=schema)
 
 
 class GonkaClient(BaseLLMClient):
