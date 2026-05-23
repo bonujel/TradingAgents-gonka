@@ -80,6 +80,7 @@ class SettingsUpdate(BaseModel):
     deep_model: Optional[str] = None
     quick_model: Optional[str] = None
     max_workers: int = Field(default=4, ge=1, le=16)
+    llm_debug: bool = False
 
 
 class RunRequest(BaseModel):
@@ -166,6 +167,7 @@ def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     if update.quick_model:
         next_settings["quick_model"] = update.quick_model
     next_settings["max_workers"] = update.max_workers
+    next_settings["llm_debug"] = update.llm_debug
     save_settings(next_settings)
     return public_view(next_settings)
 

@@ -191,6 +191,23 @@ class GonkaClient(BaseLLMClient):
             for key, value in defaults.items():
                 llm_kwargs.setdefault(key, self.kwargs.get(key, value))
 
+    def _attach_debug_logger(self, llm_kwargs: dict[str, Any]) -> None:
+        """When the operator flips the ``Capture LLM debug log`` toggle in
+        Settings (which exports ``TRADINGAGENTS_LLM_DEBUG=1``), attach an
+        :class:`LLMDebugLogger` to ``callbacks`` so every chat-model
+        invocation through this LLM lands as a line in
+        ``~/.tradingagents/app/logs/llm_debug.jsonl``.
+
+        Existing user-supplied callbacks are preserved — the debug logger
+        is appended, not substituted.
+        """
+        from .debug_logging import LLMDebugLogger, debug_logging_enabled
+
+        if not debug_logging_enabled():
+            return
+        existing = llm_kwargs.get("callbacks") or []
+        llm_kwargs["callbacks"] = [*existing, LLMDebugLogger()]
+
     def _build_sdk_llm(self, source_url: str, private_key: str) -> Any:
         import httpx
         from gonka_openai import gonka_http_client
@@ -235,6 +252,7 @@ class GonkaClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
         self._apply_streaming_defaults(llm_kwargs)
+        self._attach_debug_logger(llm_kwargs)
         return GonkaStreamSafeChatOpenAI(**llm_kwargs)
 
     def _build_router_llm(self, api_key: str) -> Any:
@@ -247,6 +265,7 @@ class GonkaClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
         self._apply_streaming_defaults(llm_kwargs)
+        self._attach_debug_logger(llm_kwargs)
         return GonkaStreamSafeChatOpenAI(**llm_kwargs)
 
     # ── public API ─────────────────────────────────────────────────────────

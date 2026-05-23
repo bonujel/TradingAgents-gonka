@@ -174,6 +174,30 @@
         </div>
       </section>
 
+      <section class="card space-y-3 p-5">
+        <h3 class="text-sm font-semibold uppercase tracking-wider text-gonka-muted">
+          Diagnostics
+        </h3>
+        <label class="flex items-start gap-3 cursor-pointer">
+          <input
+            v-model="draft.llm_debug"
+            type="checkbox"
+            class="mt-0.5 h-4 w-4 accent-emerald-500"
+          />
+          <div class="text-sm">
+            <div class="font-semibold text-gonka-text">Capture LLM debug log</div>
+            <p class="mt-1 text-xs text-gonka-muted">
+              Append every chat-model invocation — prompt messages, generation
+              parameters, response, latency, and any error — to
+              <code class="font-mono">~/.tradingagents/app/logs/llm_debug.jsonl</code>.
+              Use this when reproducing model misbehaviour (token salad, repetition
+              loops, mysterious truncations). Off by default; the file grows
+              roughly 50-200 KB per ticker run while enabled.
+            </p>
+          </div>
+        </label>
+      </section>
+
       <section class="flex items-center gap-3">
         <button
           class="btn btn-primary"
@@ -214,6 +238,7 @@ const draft = reactive<SettingsUpdate>({
   deep_model: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
   quick_model: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
   max_workers: 4,
+  llm_debug: false,
 });
 
 const models = computed(() =>
@@ -243,6 +268,7 @@ async function load() {
     draft.deep_model = settings.deep_model;
     draft.quick_model = settings.quick_model;
     draft.max_workers = settings.max_workers;
+    draft.llm_debug = settings.llm_debug;
     draft.router_api_key = "";
     draft.sdk_private_key = "";
   } catch (e: unknown) {
@@ -263,6 +289,7 @@ async function save() {
       deep_model: draft.deep_model,
       quick_model: draft.quick_model,
       max_workers: draft.max_workers,
+      llm_debug: draft.llm_debug,
     };
     if (draft.router_api_key) payload.router_api_key = draft.router_api_key;
     if (draft.sdk_private_key) payload.sdk_private_key = draft.sdk_private_key;
