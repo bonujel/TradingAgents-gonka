@@ -80,6 +80,8 @@ class SettingsUpdate(BaseModel):
     deep_model: Optional[str] = None
     quick_model: Optional[str] = None
     max_workers: int = Field(default=4, ge=1, le=16)
+    qwen_max_tokens: int = Field(default=4096, ge=256, le=32768)
+    kimi_max_tokens: int = Field(default=8192, ge=256, le=32768)
     llm_debug: bool = False
 
 
@@ -167,6 +169,8 @@ def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     if update.quick_model:
         next_settings["quick_model"] = update.quick_model
     next_settings["max_workers"] = update.max_workers
+    next_settings["qwen_max_tokens"] = update.qwen_max_tokens
+    next_settings["kimi_max_tokens"] = update.kimi_max_tokens
     next_settings["llm_debug"] = update.llm_debug
     save_settings(next_settings)
     return public_view(next_settings)

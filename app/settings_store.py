@@ -27,6 +27,14 @@ QWEN_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
 KIMI_MODEL = "moonshotai/Kimi-K2.6"
 MODEL_OPTIONS = (QWEN_MODEL, KIMI_MODEL)
 
+# Per-family completion-token caps. Qwen3-FP8 on Gonka has a serving-side
+# degeneracy bug at certain max_completion_tokens values (notably 256, 2048,
+# 4000, 8000, 8192) where it emits byte-level garbage instead of stopping.
+# 4096 is the empirically-safest value tested 2026-05-23; Kimi-K2.6 still
+# wants the 8192 headroom for its reasoning + visible answer.
+QWEN_DEFAULT_MAX_TOKENS = 4096
+KIMI_DEFAULT_MAX_TOKENS = 8192
+
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -44,6 +52,12 @@ def defaults_from_env() -> dict[str, Any]:
         "deep_model": os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM", QWEN_MODEL),
         "quick_model": os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM", QWEN_MODEL),
         "max_workers": int(os.environ.get("TRADINGAGENTS_APP_MAX_WORKERS", "4")),
+        "qwen_max_tokens": int(
+            os.environ.get("TRADINGAGENTS_QWEN_MAX_TOKENS", str(QWEN_DEFAULT_MAX_TOKENS))
+        ),
+        "kimi_max_tokens": int(
+            os.environ.get("TRADINGAGENTS_KIMI_MAX_TOKENS", str(KIMI_DEFAULT_MAX_TOKENS))
+        ),
         # When True, every chat-model invocation gets logged to
         # ~/.tradingagents/app/logs/llm_debug.jsonl by the callback in
         # tradingagents/llm_clients/debug_logging.py. Off by default
@@ -92,6 +106,12 @@ def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
     env["TRADINGAGENTS_DEEP_THINK_LLM"] = settings.get("deep_model") or QWEN_MODEL
     env["TRADINGAGENTS_QUICK_THINK_LLM"] = settings.get("quick_model") or QWEN_MODEL
     env["TRADINGAGENTS_APP_MAX_WORKERS"] = str(settings.get("max_workers", 4))
+    env["TRADINGAGENTS_QWEN_MAX_TOKENS"] = str(
+        settings.get("qwen_max_tokens", QWEN_DEFAULT_MAX_TOKENS)
+    )
+    env["TRADINGAGENTS_KIMI_MAX_TOKENS"] = str(
+        settings.get("kimi_max_tokens", KIMI_DEFAULT_MAX_TOKENS)
+    )
     env["TRADINGAGENTS_LLM_DEBUG"] = "1" if settings.get("llm_debug") else "0"
     env["PYTHONUNBUFFERED"] = "1"
     return env
@@ -128,6 +148,8 @@ def public_view(settings: dict[str, Any]) -> dict[str, Any]:
         "deep_model": settings.get("deep_model"),
         "quick_model": settings.get("quick_model"),
         "max_workers": settings.get("max_workers", 4),
+        "qwen_max_tokens": settings.get("qwen_max_tokens", QWEN_DEFAULT_MAX_TOKENS),
+        "kimi_max_tokens": settings.get("kimi_max_tokens", KIMI_DEFAULT_MAX_TOKENS),
         "llm_debug": bool(settings.get("llm_debug", False)),
         "configured": mode_is_configured(settings),
     }

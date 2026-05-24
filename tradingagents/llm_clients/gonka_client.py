@@ -61,21 +61,47 @@ _PASSTHROUGH_KWARGS = ("timeout", "max_retries", "callbacks", "streaming")
 _STREAMING_DEFAULTS = {"streaming": True, "stream_usage": True}
 
 
-# Generation-budget defaults applied to every Gonka call regardless of
-# transport. ``max_tokens=8192`` is set high enough that reasoning models
-# (e.g. Kimi-K2.6) don't burn their entire budget on internal CoT before
-# producing a single visible chunk. Background:
-#   * Reasoning models stream their CoT tokens through the same SSE channel
-#     as the visible answer, but with empty ``delta.content``. LangChain's
-#     ``generate_from_stream`` raises ``ValueError: No generations found
-#     in stream`` when zero content chunks arrive (chat_models.py:223).
-#   * Empirical 2026-05-20 batch on Kimi: ~85% of completion tokens went to
-#     reasoning. A 1024-token cap (or any other low default) left near-zero
-#     budget for visible output → the ValueError fired for every retry.
-# 8192 is loose enough for Kimi's reasoning + ~2k visible answer; non-
-# reasoning models (Qwen3-Instruct) simply ignore the headroom — they stop
-# at finish_reason='stop' well below the cap, so there's no cost impact.
-_GENERATION_DEFAULTS = {"max_tokens": 8192}
+# Per-family ``max_tokens`` defaults. The two families that Gonka serves
+# need different caps for two unrelated reasons:
+#
+# * **Kimi-K2.6** (reasoning model): streams CoT tokens through the SSE
+#   channel as ``delta.content == ""`` chunks. LangChain's
+#   ``generate_from_stream`` raises ``ValueError: No generations found in
+#   stream`` (chat_models.py:223) when zero content chunks arrive, so the
+#   cap must leave room for both the reasoning trace and the visible
+#   answer. Empirical 2026-05-20: ~85% of completion tokens went to
+#   reasoning; 8192 leaves ~2 k for visible output.
+# * **Qwen3-235B-Instruct-2507-FP8** (non-reasoning): Gonka's FP8 serving
+#   has a deterministic degeneration bug at certain ``max_completion_tokens``
+#   values — verified 2026-05-23 that 256, 2048, 4000, 8000 and ≥8192 emit
+#   byte-level garbage (``#(c(c(c…``, ``피피피``, ``/access随着时间…``) instead
+#   of producing the requested output. 4096 was the empirically-safest
+#   value in that sweep, and Qwen3-Instruct doesn't need the headroom that
+#   Kimi needs because it has no internal CoT stream.
+#
+# Operators tune these per-family caps via Settings → "Qwen max tokens" /
+# "Kimi max tokens"; the values are exported as TRADINGAGENTS_QWEN_MAX_TOKENS
+# and TRADINGAGENTS_KIMI_MAX_TOKENS by ``app/settings_store.py``.
+_DEFAULT_MAX_TOKENS_PER_FAMILY = {"qwen": 4096, "kimi": 8192}
+_ENV_PER_FAMILY = {
+    "qwen": "TRADINGAGENTS_QWEN_MAX_TOKENS",
+    "kimi": "TRADINGAGENTS_KIMI_MAX_TOKENS",
+}
+_FALLBACK_MAX_TOKENS = 8192  # unknown model families (e.g. future additions)
+
+
+def _max_tokens_for(model: str) -> int:
+    name = (model or "").lower()
+    for family, env_var in _ENV_PER_FAMILY.items():
+        if family in name:
+            raw = os.environ.get(env_var)
+            if raw:
+                try:
+                    return int(raw)
+                except ValueError:
+                    logger.warning("Invalid %s=%r — using family default", env_var, raw)
+            return _DEFAULT_MAX_TOKENS_PER_FAMILY[family]
+    return _FALLBACK_MAX_TOKENS
 
 
 # The centralised router endpoint. Hardcoded here rather than in
@@ -183,13 +209,17 @@ class GonkaClient(BaseLLMClient):
 
         Caller-passed kwargs win — operators who pass ``streaming=False`` or
         a custom ``max_tokens`` get their value through. ``stream_usage``
-        only takes effect when streaming is on, so we mirror that. See the
-        ``_STREAMING_DEFAULTS`` and ``_GENERATION_DEFAULTS`` block comments
-        above for the rationale behind each default.
+        only takes effect when streaming is on, so we mirror that. ``max_tokens``
+        defaults to the per-family cap from :func:`_max_tokens_for` (read from
+        ``TRADINGAGENTS_*_MAX_TOKENS`` env, populated by the Settings UI) — see
+        the module-level block comment for the family-specific rationale.
         """
-        for defaults in (_STREAMING_DEFAULTS, _GENERATION_DEFAULTS):
-            for key, value in defaults.items():
-                llm_kwargs.setdefault(key, self.kwargs.get(key, value))
+        for key, value in _STREAMING_DEFAULTS.items():
+            llm_kwargs.setdefault(key, self.kwargs.get(key, value))
+        llm_kwargs.setdefault(
+            "max_tokens",
+            self.kwargs.get("max_tokens", _max_tokens_for(self.model)),
+        )
 
     def _attach_debug_logger(self, llm_kwargs: dict[str, Any]) -> None:
         """When the operator flips the ``Capture LLM debug log`` toggle in

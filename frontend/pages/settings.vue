@@ -172,6 +172,40 @@
             page.
           </p>
         </div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="label mb-1">Qwen max tokens</label>
+            <input
+              v-model.number="draft.qwen_max_tokens"
+              type="number"
+              min="256"
+              max="32768"
+              class="input"
+            />
+            <p class="mt-1 text-xs text-gonka-muted">
+              Per-call <code>max_tokens</code> cap for Qwen-family models. Gonka's
+              FP8 Qwen serving has a deterministic degeneration bug at certain
+              values (notably 256, 2048, 4000, 8000, ≥8192) — default 4096 was
+              empirically safe in the 2026-05-23 sweep.
+            </p>
+          </div>
+          <div>
+            <label class="label mb-1">Kimi max tokens</label>
+            <input
+              v-model.number="draft.kimi_max_tokens"
+              type="number"
+              min="256"
+              max="32768"
+              class="input"
+            />
+            <p class="mt-1 text-xs text-gonka-muted">
+              Per-call <code>max_tokens</code> cap for Kimi-K2.6. Needs the full
+              8192 because Kimi streams its CoT through the same SSE channel
+              before any visible content — a tight cap stalls
+              LangChain's stream aggregator.
+            </p>
+          </div>
+        </div>
       </section>
 
       <section class="card space-y-3 p-5">
@@ -238,6 +272,8 @@ const draft = reactive<SettingsUpdate>({
   deep_model: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
   quick_model: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
   max_workers: 4,
+  qwen_max_tokens: 4096,
+  kimi_max_tokens: 8192,
   llm_debug: false,
 });
 
@@ -268,6 +304,8 @@ async function load() {
     draft.deep_model = settings.deep_model;
     draft.quick_model = settings.quick_model;
     draft.max_workers = settings.max_workers;
+    draft.qwen_max_tokens = settings.qwen_max_tokens;
+    draft.kimi_max_tokens = settings.kimi_max_tokens;
     draft.llm_debug = settings.llm_debug;
     draft.router_api_key = "";
     draft.sdk_private_key = "";
@@ -289,6 +327,8 @@ async function save() {
       deep_model: draft.deep_model,
       quick_model: draft.quick_model,
       max_workers: draft.max_workers,
+      qwen_max_tokens: draft.qwen_max_tokens,
+      kimi_max_tokens: draft.kimi_max_tokens,
       llm_debug: draft.llm_debug,
     };
     if (draft.router_api_key) payload.router_api_key = draft.router_api_key;

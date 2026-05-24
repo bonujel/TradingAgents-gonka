@@ -1,0 +1,57 @@
+=== snapshot 20260524_012833 (i=6) ===
+=== runner PID 231880 alive; etime:       37:21 ===
+
+jsonl: 21 records  | since: 2026-05-23T16:51
+db   : 8 rows         | trade_date: 2026-05-23
+
+  #  ts                         node                    step  finish       tools  content   prompt  elapsed_s  ticker
+----------------------------------------------------------------------------------------------------------------------------------
+  0  2026-05-23T16:51:16        Market Analyst             1  tool_calls   Y            1     4659       31.7  NVDA
+  1  2026-05-23T16:51:49        Market Analyst             3  tool_calls   Y          153    33169       33.6  NVDA
+  2  2026-05-23T16:52:32        Market Analyst             5  ?            -          837    63116      301.9  NVDA
+  3  2026-05-23T16:57:41        Social Analyst             7  length       -            0    25110      115.7  NVDA EMPTY LENGTH
+  4  2026-05-23T16:59:37        News Analyst               9  tool_calls   Y            1     1424       27.8  NVDA
+  5  2026-05-23T17:00:07        News Analyst              11  length       -         9758    19175       32.8  NVDA LENGTH
+  6  2026-05-23T17:00:40        Fundamentals Analyst      13  tool_calls   Y            1     1658       10.7  NVDA
+  7  2026-05-23T17:00:53        Fundamentals Analyst      15  length       -         7012    17580       34.7  NVDA LENGTH
+  8  2026-05-23T17:01:28        Bull Researcher           17  stop         -         6207    18979       83.9  AI
+  9  2026-05-23T17:02:52        Bear Researcher           18  length       -         6001    31489       35.6  AI LENGTH
+ 10  2026-05-23T17:03:28        Research Manager          19  ?            -            0    13800      301.0  NVDA EMPTY
+ 11  2026-05-23T17:08:29        Trader                    20  stop         -          447     1598      218.7  NVDA
+ 12  2026-05-23T17:12:07        Aggressive Analyst        21  length       -         2695    19874       33.0  AI LENGTH
+ 13  2026-05-23T17:12:40        Conservative Analyst      22  ?            -         5263    25176      301.6  AI
+ 14  2026-05-23T17:17:42        Neutral Analyst           23  length       -         5406    35644       34.2  AI LENGTH
+ 15  2026-05-23T17:18:16        Portfolio Manager         24  length       -            0    24414      113.3  NVDA EMPTY LENGTH
+ 16  2026-05-23T17:20:12        Market Analyst             1  tool_calls   Y            0     4659       62.4  MSFT
+ 17  2026-05-23T17:21:15        Market Analyst             3  tool_calls   Y            1    18797       64.4  MSFT
+ 18  2026-05-23T17:22:29        Market Analyst             5  length       -         9109    76606      118.2  MSFT LENGTH
+ 19  2026-05-23T17:24:33        Social Analyst             7  length       -            0    23026       35.2  MSFT EMPTY LENGTH
+ 20  2026-05-23T17:25:09        News Analyst               9  tool_calls   Y          139     1424       10.5  MSFT
+
+[finish_reason] tally:
+  length         : 9
+  tool_calls     : 7
+  None           : 3
+  stop           : 2
+
+[empty-content] events by node:
+  Social Analyst: 2
+    - step=7  finish=length  prompt_chars=25110  elapsed=115.7s
+    - step=7  finish=length  prompt_chars=23026  elapsed=35.2s
+  Research Manager: 1
+    - step=19  finish=None  prompt_chars=13800  elapsed=301.0s
+  Portfolio Manager: 1
+    - step=24  finish=length  prompt_chars=24414  elapsed=113.3s
+
+[errors] none (no on_llm_error events)
+
+[db] decision rows:
+  ticker   rating        final   mkt  sent  news  fund  plan   trd   err
+  AAPL     Hold           3066  4094  6947   107  8503   954   636     0
+  AMZN     Hold           2631 14875  7241  6213   123  1331   803     0
+  AVGO     Underweight    2600  7144  7012  8138  5198  1079   687     0
+  BRK.B    Overweight     2802  7290  6913  1695 10062  1034   612     0
+  GOOGL    Overweight     2367  4110  7139 16927  6518   947   740     0
+  META     Hold           2443  8130  7457  4556  2939  1150   618     0
+  MSFT     <NULL>            0  9568     0     0  9821     0   449     0
+  NVDA     <NULL>            0   837     0  9758  7012     0   447     0

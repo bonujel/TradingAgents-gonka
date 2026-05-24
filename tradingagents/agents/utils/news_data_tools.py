@@ -2,6 +2,8 @@ from langchain_core.tools import tool
 from typing import Annotated, Optional
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .date_sanitize import sanitize_llm_date
+
 @tool
 def get_news(
     ticker: Annotated[str, "Ticker symbol"],
@@ -18,6 +20,8 @@ def get_news(
     Returns:
         str: A formatted string containing news data
     """
+    start_date = sanitize_llm_date(start_date, tool="get_news", arg="start_date")
+    end_date = sanitize_llm_date(end_date, tool="get_news", arg="end_date")
     return route_to_vendor("get_news", ticker, start_date, end_date)
 
 @tool
@@ -40,6 +44,7 @@ def get_global_news(
     Returns:
         str: A formatted string containing global news data
     """
+    curr_date = sanitize_llm_date(curr_date, tool="get_global_news", arg="curr_date")
     return route_to_vendor("get_global_news", curr_date, look_back_days, limit)
 
 @tool

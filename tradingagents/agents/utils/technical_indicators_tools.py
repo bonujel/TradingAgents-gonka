@@ -2,6 +2,8 @@ from langchain_core.tools import tool
 from typing import Annotated
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .date_sanitize import sanitize_llm_date
+
 @tool
 def get_indicators(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -20,6 +22,7 @@ def get_indicators(
     Returns:
         str: A formatted dataframe containing the technical indicators for the specified ticker symbol and indicator.
     """
+    curr_date = sanitize_llm_date(curr_date, tool="get_indicators", arg="curr_date")
     # LLMs sometimes pass multiple indicators as a comma-separated string;
     # split and process each individually.
     indicators = [i.strip().lower() for i in indicator.split(",") if i.strip()]

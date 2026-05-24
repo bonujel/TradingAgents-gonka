@@ -1,0 +1,56 @@
+=== snapshot 20260523_235602 (i=3) ===
+=== runner PID 220318 alive; etime:       33:01 ===
+
+jsonl: 20 records  | since: 2026-05-23T15:23
+db   : 8 rows         | trade_date: 2026-05-23
+
+  #  ts                         node                    step  finish       tools  content   prompt  elapsed_s  ticker
+----------------------------------------------------------------------------------------------------------------------------------
+  0  2026-05-23T15:23:07        Market Analyst             1  tool_calls   Y          920     4659      227.8  NVDA
+  1  2026-05-23T15:26:56        Market Analyst             3  tool_calls   Y          110    12747       22.9  NVDA
+  2  2026-05-23T15:27:19        Market Analyst             5  tool_calls   Y          110    52066        7.5  NVDA
+  3  2026-05-23T15:27:27        Market Analyst             7  length       -         4645    61741       38.3  NVDA LENGTH
+  4  2026-05-23T15:28:12        Social Analyst             9  length       -            0    24827      115.7  NVDA EMPTY LENGTH
+  5  2026-05-23T15:30:08        News Analyst              11  tool_calls   Y            1     1424        4.2  NVDA
+  6  2026-05-23T15:30:15        News Analyst              13  length       -         1236    20582      114.9  NVDA LENGTH
+  7  2026-05-23T15:32:10        Fundamentals Analyst      15  tool_calls   Y            0     1658       24.7  NVDA
+  8  2026-05-23T15:32:37        Fundamentals Analyst      17  length       -         6068    17579       34.7  NVDA LENGTH
+  9  2026-05-23T15:33:12        Bull Researcher           19  length       -         2149    13321      111.6  R LENGTH
+ 10  2026-05-23T15:35:04        Bear Researcher           20  length       -         4395    17715      115.0  R LENGTH
+ 11  2026-05-23T15:36:59        Research Manager          21  stop         -         1346     8136      140.3  NVDA
+ 12  2026-05-23T15:39:19        Trader                    22  stop         -          692     2944       38.2  NVDA
+ 13  2026-05-23T15:39:57        Aggressive Analyst        23  length       -            0    14461      113.5  R EMPTY LENGTH
+ 14  2026-05-23T15:41:51        Conservative Analyst      24  stop         -         5409    14373       69.2  R
+ 15  2026-05-23T15:43:00        Neutral Analyst           25  length       -            0    25133      265.4  R EMPTY LENGTH
+ 16  2026-05-23T15:47:25        Portfolio Manager         26  length       -            0    18050      114.0  NVDA EMPTY LENGTH
+ 17  2026-05-23T15:49:22        Market Analyst             1  tool_calls   Y            1     4659       13.4  MSFT
+ 18  2026-05-23T15:49:36        Market Analyst             3  tool_calls   Y            0    24186       25.8  MSFT
+ 19  2026-05-23T15:50:02        Market Analyst             5  length       -         9568    53914      114.5  MSFT LENGTH
+
+[finish_reason] tally:
+  length         : 10
+  tool_calls     : 7
+  stop           : 3
+
+[empty-content] events by node:
+  Social Analyst: 1
+    - step=9  finish=length  prompt_chars=24827  elapsed=115.7s
+  Aggressive Analyst: 1
+    - step=23  finish=length  prompt_chars=14461  elapsed=113.5s
+  Neutral Analyst: 1
+    - step=25  finish=length  prompt_chars=25133  elapsed=265.4s
+  Portfolio Manager: 1
+    - step=26  finish=length  prompt_chars=18050  elapsed=114.0s
+
+[errors] none (no on_llm_error events)
+
+[db] decision rows:
+  ticker   rating        final   mkt  sent  news  fund  plan   trd   err
+  AAPL     Hold           3066  4094  6947   107  8503   954   636     0
+  AMZN     Hold           2631 14875  7241  6213   123  1331   803     0
+  AVGO     Underweight    2600  7144  7012  8138  5198  1079   687     0
+  BRK.B    Overweight     2802  7290  6913  1695 10062  1034   612     0
+  GOOGL    Overweight     2367  4110  7139 16927  6518   947   740     0
+  META     Hold           2443  8130  7457  4556  2939  1150   618     0
+  MSFT     Hold           2766  9306  6669  5929   106   985   688     0
+  NVDA     <NULL>            0  4645     0  1236  6068  1346   692     0

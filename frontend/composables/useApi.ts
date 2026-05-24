@@ -107,6 +107,8 @@ export interface SettingsResponse {
   deep_model: string;
   quick_model: string;
   max_workers: number;
+  qwen_max_tokens: number;
+  kimi_max_tokens: number;
   llm_debug: boolean;
   configured: boolean;
 }
@@ -119,6 +121,8 @@ export interface SettingsUpdate {
   deep_model?: string;
   quick_model?: string;
   max_workers: number;
+  qwen_max_tokens: number;
+  kimi_max_tokens: number;
   llm_debug: boolean;
 }
 

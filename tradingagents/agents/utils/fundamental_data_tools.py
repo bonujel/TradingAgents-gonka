@@ -2,6 +2,8 @@ from langchain_core.tools import tool
 from typing import Annotated
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .date_sanitize import sanitize_llm_date
+
 
 @tool
 def get_fundamentals(
@@ -17,6 +19,7 @@ def get_fundamentals(
     Returns:
         str: A formatted report containing comprehensive fundamental data
     """
+    curr_date = sanitize_llm_date(curr_date, tool="get_fundamentals", arg="curr_date")
     return route_to_vendor("get_fundamentals", ticker, curr_date)
 
 
@@ -36,6 +39,7 @@ def get_balance_sheet(
     Returns:
         str: A formatted report containing balance sheet data
     """
+    curr_date = sanitize_llm_date(curr_date, tool="get_balance_sheet", arg="curr_date")
     return route_to_vendor("get_balance_sheet", ticker, freq, curr_date)
 
 
@@ -55,6 +59,7 @@ def get_cashflow(
     Returns:
         str: A formatted report containing cash flow statement data
     """
+    curr_date = sanitize_llm_date(curr_date, tool="get_cashflow", arg="curr_date")
     return route_to_vendor("get_cashflow", ticker, freq, curr_date)
 
 
@@ -74,4 +79,5 @@ def get_income_statement(
     Returns:
         str: A formatted report containing income statement data
     """
+    curr_date = sanitize_llm_date(curr_date, tool="get_income_statement", arg="curr_date")
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)

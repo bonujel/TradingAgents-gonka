@@ -1,0 +1,31 @@
+=== snapshot 20260524_005832 (i=1) ===
+=== runner PID 231880 alive; etime:       07:21 ===
+
+jsonl: 3 records  | since: 2026-05-23T16:51
+db   : 8 rows         | trade_date: 2026-05-23
+
+  #  ts                         node                    step  finish       tools  content   prompt  elapsed_s  ticker
+----------------------------------------------------------------------------------------------------------------------------------
+  0  2026-05-23T16:51:16        Market Analyst             1  tool_calls   Y            1     4659       31.7  NVDA
+  1  2026-05-23T16:51:49        Market Analyst             3  tool_calls   Y          153    33169       33.6  NVDA
+  2  2026-05-23T16:52:32        Market Analyst             5  ?            -          837    63116      301.9  NVDA
+
+[finish_reason] tally:
+  tool_calls     : 2
+  None           : 1
+
+[empty-content] none observed
+
+
+[errors] none (no on_llm_error events)
+
+[db] decision rows:
+  ticker   rating        final   mkt  sent  news  fund  plan   trd   err
+  AAPL     Hold           3066  4094  6947   107  8503   954   636     0
+  AMZN     Hold           2631 14875  7241  6213   123  1331   803     0
+  AVGO     Underweight    2600  7144  7012  8138  5198  1079   687     0
+  BRK.B    Overweight     2802  7290  6913  1695 10062  1034   612     0
+  GOOGL    Overweight     2367  4110  7139 16927  6518   947   740     0
+  META     Hold           2443  8130  7457  4556  2939  1150   618     0
+  MSFT     <NULL>            0  9568     0     0  9821     0   449     0
+  NVDA     <NULL>            0  4645     0  1236  6068  1346   692     0
