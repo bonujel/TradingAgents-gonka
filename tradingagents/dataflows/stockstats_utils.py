@@ -7,6 +7,7 @@ from yfinance.exceptions import YFRateLimitError
 from stockstats import wrap
 from typing import Annotated
 import os
+from ._yfinance_lock import YFINANCE_LOCK
 from .config import get_config
 from .utils import safe_ticker_component, to_yahoo_symbol
 
@@ -19,10 +20,18 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
     retry them internally. This wrapper adds retry logic specifically
     for rate limits. Other exceptions propagate immediately.
+
+    The call is held under ``YFINANCE_LOCK`` so that the runner's
+    ThreadPoolExecutor cannot have multiple threads open yfinance's
+    peewee/SQLite cache concurrently — that race produces
+    ``sqlite3.OperationalError: database is locked`` which the runner
+    cannot retry (verified 2026-05-25 run on AMZN, see commit body).
+    See ``_yfinance_lock.py`` for the full rationale.
     """
     for attempt in range(max_retries + 1):
         try:
-            return func()
+            with YFINANCE_LOCK:
+                return func()
         except YFRateLimitError:
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
@@ -32,8 +41,39 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 raise
 
 
+# Maps every plausible spelling of the date column to the canonical
+# ``Date`` that downstream code expects.
+#
+# Why this matters: ``load_ohlcv`` writes the cache after
+# ``data.reset_index()``. yfinance returns a DataFrame whose
+# ``DatetimeIndex`` has ``name=None`` on some yfinance / pandas combos
+# (verified on the deploy host 2026-05-25: every CSV in
+# ``~/.tradingagents/cache/`` starts ``index,Close,High,Low,Open,Volume``).
+# When that gets read back, ``_clean_dataframe`` raised ``KeyError:
+# 'Date'`` on every indicator call — hundreds of identical lines in the
+# runner log per batch.
+_DATE_COLUMN_ALIASES = ("Date", "Datetime", "date", "datetime", "index", "Unnamed: 0")
+
+
+def _normalize_date_column(data: pd.DataFrame) -> pd.DataFrame:
+    """Make the date column be named ``Date``, whatever it was on disk.
+
+    Picks the first column in the frame whose name matches a known alias
+    (in priority order) and renames it to ``Date``. If a real ``Date``
+    column already exists we leave the frame alone — even when there is a
+    stray second alias, renaming it would create a duplicate column.
+    """
+    if "Date" in data.columns:
+        return data
+    for alias in _DATE_COLUMN_ALIASES[1:]:
+        if alias in data.columns:
+            return data.rename(columns={alias: "Date"})
+    return data
+
+
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
+    data = _normalize_date_column(data)
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
 
@@ -86,7 +126,13 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             progress=False,
             auto_adjust=True,
         ))
-        data = data.reset_index()
+        # Some yfinance / pandas combos return a DatetimeIndex with
+        # ``name=None``; reset_index() then names the resulting column
+        # ``"index"`` instead of ``"Date"``. Normalise before we persist
+        # so downstream readers and the cache stay consistent — older
+        # ``"index"``-headed CSVs still on disk are tolerated at read
+        # time by ``_clean_dataframe``.
+        data = _normalize_date_column(data.reset_index())
         data.to_csv(data_file, index=False, encoding="utf-8")
 
     data = _clean_dataframe(data)
