@@ -5,8 +5,13 @@
 #   ./start.sh         stop everything, then start backend + frontend
 #   ./start.sh stop    stop everything and exit
 #
-# Backend  : uvicorn app.api:app   -> http://127.0.0.1:8000  (log: log-back.log)
-# Frontend : nuxt dev              -> http://127.0.0.1:3000  (log: log-front.log)
+# Backend  : uvicorn app.api:app                            -> http://127.0.0.1:8000  (log: log-back.log)
+# Frontend : nuxt build  +  node .output/server/index.mjs   -> http://127.0.0.1:3000  (log: log-front.log)
+#
+# Frontend runs the production Nitro server (not `nuxt dev`) so it can serve
+# real hostnames behind a reverse proxy — `nuxt dev` is Vite-based and rejects
+# requests whose Host header is not in `server.allowedHosts`, which 400s every
+# request from a public domain.
 #
 # "Stop everything" also kills detached `python -m app.runner` analysis
 # subprocesses spawned by the backend, so a restart starts from a clean slate.
@@ -31,10 +36,11 @@ log() { printf '\033[0;36m[start.sh]\033[0m %s\n' "$*"; }
 stop_all() {
   log "Stopping backend, frontend, and analysis subprocesses..."
   # `|| true` — pkill exits non-zero when nothing matched, which is fine.
-  pkill -f "uvicorn app.api"  2>/dev/null || true   # backend
-  pkill -f "app\.runner"      2>/dev/null || true   # detached analysis runs
-  pkill -f "nuxt dev"         2>/dev/null || true   # frontend dev server
-  pkill -f "npm run dev"      2>/dev/null || true   # frontend npm wrapper
+  pkill -f "uvicorn app.api"               2>/dev/null || true  # backend
+  pkill -f "app\.runner"                   2>/dev/null || true  # detached analysis runs
+  pkill -f "\.output/server/index\.mjs"    2>/dev/null || true  # frontend prod (current)
+  pkill -f "nuxt dev"                      2>/dev/null || true  # frontend dev (legacy, just in case)
+  pkill -f "npm run dev"                   2>/dev/null || true  # frontend dev npm wrapper (legacy)
   # Give the OS a moment to release the listening ports.
   sleep 2
   # Drop the stale active-task index so the next backend boot starts clean.
@@ -96,10 +102,24 @@ nohup uvicorn app.api:app \
 BACKEND_PID=$!
 log "Backend PID $BACKEND_PID — log: $BACK_LOG"
 
-log "Starting frontend on http://${FRONTEND_HOST}:${FRONTEND_PORT} ..."
+log "Building frontend (nuxt build → .output/) ..."
 cd "$REPO_DIR/frontend"
-nohup npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" \
-  > "$FRONT_LOG" 2>&1 &
+# Build is foreground + blocking on purpose: a failed build must abort the
+# whole restart instead of leaving a stale .output running. `set -e` at the
+# top of the script means a non-zero npm exit kills us here.
+: > "$FRONT_LOG"  # truncate so the build output is the first thing in the log
+if ! npm run build >> "$FRONT_LOG" 2>&1; then
+  log "ERROR: frontend build failed — see $FRONT_LOG. Aborting restart."
+  log "Backend (PID $BACKEND_PID) is up but the frontend is NOT started."
+  exit 1
+fi
+log "Build OK."
+
+log "Starting frontend on http://${FRONTEND_HOST}:${FRONTEND_PORT} (production Nitro server) ..."
+# .output/server/index.mjs is a Nitro server. It does NOT take --host/--port
+# CLI flags; configuration is via NITRO_HOST / NITRO_PORT env vars.
+NITRO_HOST="$FRONTEND_HOST" NITRO_PORT="$FRONTEND_PORT" \
+  nohup node .output/server/index.mjs >> "$FRONT_LOG" 2>&1 &
 FRONTEND_PID=$!
 log "Frontend PID $FRONTEND_PID — log: $FRONT_LOG"
 
