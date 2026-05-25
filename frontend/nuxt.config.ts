@@ -40,18 +40,35 @@ export default defineNuxtConfig({
 
   runtimeConfig: {
     public: {
-      apiBase: process.env.NUXT_PUBLIC_API_BASE || "http://127.0.0.1:8000",
+      // Default to an empty string so client-side $fetch issues *relative*
+      // URLs (/api/...). The browser then hits the same origin as the page,
+      // and the Nitro server itself (see ``nitro.routeRules`` below) proxies
+      // those paths to the FastAPI backend on 127.0.0.1:8000.
+      //
+      // Why not the previous default (``http://127.0.0.1:8000``)? In
+      // production the runtimeConfig.public.apiBase value is baked into the
+      // client bundle, so every browser literally tries to reach
+      // ``http://127.0.0.1:8000`` — its OWN localhost, where nothing is
+      // listening. ``Failed to fetch`` on every API call.
+      //
+      // Set NUXT_PUBLIC_API_BASE at build time only if the backend lives on
+      // a different origin (separate api.* domain etc.) — for the single-host
+      // reverse-proxy deployment, leave it unset.
+      apiBase: process.env.NUXT_PUBLIC_API_BASE || "",
     },
   },
 
   typescript: { strict: true, shim: false },
 
   nitro: {
-    devProxy: {
-      "/api": {
-        target: "http://127.0.0.1:8000/api",
-        changeOrigin: true,
-      },
+    // routeRules works in both dev and production — replaces the old
+    // ``devProxy`` block which only fired under ``nuxt dev``. Once we
+    // switched to ``node .output/server/index.mjs`` for production, the
+    // /api proxy stopped working and every browser request 400/404'd
+    // (some hit the Nitro server as missing pages, some hit
+    // ``http://127.0.0.1:8000`` baked into the client bundle).
+    routeRules: {
+      "/api/**": { proxy: "http://127.0.0.1:8000/api/**" },
     },
   },
 });
