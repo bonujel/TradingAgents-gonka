@@ -110,6 +110,7 @@ export interface SettingsResponse {
   qwen_max_tokens: number;
   kimi_max_tokens: number;
   llm_debug: boolean;
+  disable_kimi_thinking: boolean;
   configured: boolean;
 }
 
@@ -124,6 +125,7 @@ export interface SettingsUpdate {
   qwen_max_tokens: number;
   kimi_max_tokens: number;
   llm_debug: boolean;
+  disable_kimi_thinking: boolean;
 }
 
 export interface LoginResponse {

@@ -64,6 +64,13 @@ def defaults_from_env() -> dict[str, Any]:
         # because the file grows ~50-200 KB per ticker run and the prompt
         # bodies are large.
         "llm_debug": _env_truthy("TRADINGAGENTS_LLM_DEBUG"),
+        # When True, send ``chat_template_kwargs.thinking=false`` to Gonka
+        # for Kimi-family models so the backend skips reasoning_content.
+        # Verified 2026-05-25 to cut completion_tokens ~75% and let the
+        # full token budget go to the visible answer. Off by default to
+        # preserve current behaviour; flip on for faster / cheaper runs
+        # where CoT-quality dependence has been validated.
+        "disable_kimi_thinking": _env_truthy("TRADINGAGENTS_DISABLE_KIMI_THINKING"),
     }
 
 
@@ -113,6 +120,9 @@ def settings_to_env(settings: dict[str, Any]) -> dict[str, str]:
         settings.get("kimi_max_tokens", KIMI_DEFAULT_MAX_TOKENS)
     )
     env["TRADINGAGENTS_LLM_DEBUG"] = "1" if settings.get("llm_debug") else "0"
+    env["TRADINGAGENTS_DISABLE_KIMI_THINKING"] = (
+        "1" if settings.get("disable_kimi_thinking") else "0"
+    )
     env["PYTHONUNBUFFERED"] = "1"
     return env
 
@@ -151,5 +161,6 @@ def public_view(settings: dict[str, Any]) -> dict[str, Any]:
         "qwen_max_tokens": settings.get("qwen_max_tokens", QWEN_DEFAULT_MAX_TOKENS),
         "kimi_max_tokens": settings.get("kimi_max_tokens", KIMI_DEFAULT_MAX_TOKENS),
         "llm_debug": bool(settings.get("llm_debug", False)),
+        "disable_kimi_thinking": bool(settings.get("disable_kimi_thinking", False)),
         "configured": mode_is_configured(settings),
     }

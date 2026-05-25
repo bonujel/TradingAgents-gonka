@@ -83,6 +83,7 @@ class SettingsUpdate(BaseModel):
     qwen_max_tokens: int = Field(default=4096, ge=256, le=32768)
     kimi_max_tokens: int = Field(default=8192, ge=256, le=32768)
     llm_debug: bool = False
+    disable_kimi_thinking: bool = False
 
 
 class RunRequest(BaseModel):
@@ -172,6 +173,7 @@ def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     next_settings["qwen_max_tokens"] = update.qwen_max_tokens
     next_settings["kimi_max_tokens"] = update.kimi_max_tokens
     next_settings["llm_debug"] = update.llm_debug
+    next_settings["disable_kimi_thinking"] = update.disable_kimi_thinking
     save_settings(next_settings)
     return public_view(next_settings)
 

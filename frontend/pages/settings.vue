@@ -206,6 +206,25 @@
             </p>
           </div>
         </div>
+        <label class="flex items-start gap-3 cursor-pointer">
+          <input
+            v-model="draft.disable_kimi_thinking"
+            type="checkbox"
+            class="mt-0.5 h-4 w-4 accent-emerald-500"
+          />
+          <div class="text-sm">
+            <div class="font-semibold text-gonka-text">Disable Kimi thinking (faster, no CoT)</div>
+            <p class="mt-1 text-xs text-gonka-muted">
+              Send <code class="font-mono">chat_template_kwargs.thinking=false</code>
+              to Gonka for Kimi-family models so the backend skips
+              reasoning_content. Verified 2026-05-25: reasoning length drops to
+              0 and <code>completion_tokens</code> falls roughly 75%, with the
+              freed budget redirected to the visible answer. Off by default;
+              flip on once you've confirmed your prompts don't rely on
+              Kimi's chain-of-thought.
+            </p>
+          </div>
+        </label>
       </section>
 
       <section class="card space-y-3 p-5">
@@ -275,6 +294,7 @@ const draft = reactive<SettingsUpdate>({
   qwen_max_tokens: 4096,
   kimi_max_tokens: 8192,
   llm_debug: false,
+  disable_kimi_thinking: false,
 });
 
 const models = computed(() =>
@@ -307,6 +327,7 @@ async function load() {
     draft.qwen_max_tokens = settings.qwen_max_tokens;
     draft.kimi_max_tokens = settings.kimi_max_tokens;
     draft.llm_debug = settings.llm_debug;
+    draft.disable_kimi_thinking = settings.disable_kimi_thinking;
     draft.router_api_key = "";
     draft.sdk_private_key = "";
   } catch (e: unknown) {
@@ -330,6 +351,7 @@ async function save() {
       qwen_max_tokens: draft.qwen_max_tokens,
       kimi_max_tokens: draft.kimi_max_tokens,
       llm_debug: draft.llm_debug,
+      disable_kimi_thinking: draft.disable_kimi_thinking,
     };
     if (draft.router_api_key) payload.router_api_key = draft.router_api_key;
     if (draft.sdk_private_key) payload.sdk_private_key = draft.sdk_private_key;
