@@ -40,7 +40,9 @@ logger = logging.getLogger(__name__)
 
 # Forwarded verbatim to ``ChatOpenAI`` so callers can tune timeouts and retries
 # the same way they do for the other OpenAI-compatible providers.
-_PASSTHROUGH_KWARGS = ("timeout", "max_retries", "callbacks", "streaming")
+_PASSTHROUGH_KWARGS = (
+    "timeout", "max_retries", "callbacks", "streaming", "model_kwargs",
+)
 
 
 # Default kwargs that apply to both SDK and router paths. Streaming is on by
@@ -88,6 +90,13 @@ _ENV_PER_FAMILY = {
     "kimi": "TRADINGAGENTS_KIMI_MAX_TOKENS",
 }
 _FALLBACK_MAX_TOKENS = 8192  # unknown model families (e.g. future additions)
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
 def _max_tokens_for(model: str) -> int:
@@ -221,6 +230,33 @@ class GonkaClient(BaseLLMClient):
             self.kwargs.get("max_tokens", _max_tokens_for(self.model)),
         )
 
+    def _apply_kimi_thinking_toggle(self, llm_kwargs: dict[str, Any]) -> None:
+        """When ``TRADINGAGENTS_DISABLE_KIMI_THINKING=1`` and the model is in
+        the Kimi family, inject ``chat_template_kwargs.thinking=False`` into
+        ``extra_body`` so the backend's chat template skips reasoning.
+
+        Verified 2026-05-25 against Gonka's Kimi-K2.6 router endpoint:
+          * baseline: reasoning_len ≈ 6500, completion_tokens ≈ 1900
+          * with this flag: reasoning_len = 0, completion_tokens ≈ 450,
+            content_len actually *increases* (token budget redirected from
+            CoT to the visible answer)
+
+        Scope is Kimi-only because Qwen-family models on Gonka have no
+        reasoning_content channel — the flag would be silently ignored
+        there but the carve-out makes the intent obvious.
+
+        Caller-supplied ``model_kwargs.extra_body`` is preserved; only the
+        ``chat_template_kwargs.thinking`` key is set.
+        """
+        if "kimi" not in (self.model or "").lower():
+            return
+        if not _env_truthy("TRADINGAGENTS_DISABLE_KIMI_THINKING"):
+            return
+        model_kwargs = llm_kwargs.setdefault("model_kwargs", {})
+        extra_body = model_kwargs.setdefault("extra_body", {})
+        ctk = extra_body.setdefault("chat_template_kwargs", {})
+        ctk["thinking"] = False
+
     def _attach_debug_logger(self, llm_kwargs: dict[str, Any]) -> None:
         """When the operator flips the ``Capture LLM debug log`` toggle in
         Settings (which exports ``TRADINGAGENTS_LLM_DEBUG=1``), attach an
@@ -282,6 +318,7 @@ class GonkaClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
         self._apply_streaming_defaults(llm_kwargs)
+        self._apply_kimi_thinking_toggle(llm_kwargs)
         self._attach_debug_logger(llm_kwargs)
         return GonkaStreamSafeChatOpenAI(**llm_kwargs)
 
@@ -295,6 +332,7 @@ class GonkaClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
         self._apply_streaming_defaults(llm_kwargs)
+        self._apply_kimi_thinking_toggle(llm_kwargs)
         self._attach_debug_logger(llm_kwargs)
         return GonkaStreamSafeChatOpenAI(**llm_kwargs)
 

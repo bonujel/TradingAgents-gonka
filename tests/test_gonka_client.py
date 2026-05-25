@@ -145,3 +145,72 @@ class TestStructuredOutputMachineryRemoved:
     def test_structured_helper_module_deleted(self):
         with pytest.raises(ModuleNotFoundError):
             import tradingagents.agents.utils.structured  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# Kimi thinking toggle. Gonka's vLLM honours
+# ``chat_template_kwargs.thinking=False`` for Kimi-K2.6 (verified
+# 2026-05-25: reasoning_len 6572 → 0, completion_tokens 1891 → ~450,
+# content_len actually increases). The Settings UI flips this on demand via
+# TRADINGAGENTS_DISABLE_KIMI_THINKING; the client reads the env per
+# get_llm() so the toggle takes effect on the next ticker without a
+# process restart.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestKimiThinkingToggle:
+    def _build_kwargs(self, monkeypatch, model: str, **extra_kwargs) -> dict:
+        _clear_gonka_env(monkeypatch)
+        monkeypatch.setenv("GONKA_API_KEY", "router-key")
+        monkeypatch.setattr(mod, "GonkaStreamSafeChatOpenAI", _FakeChatOpenAI)
+        return mod.GonkaClient(model, **extra_kwargs).get_llm().kwargs
+
+    def test_default_no_extra_body_for_kimi(self, monkeypatch):
+        # Default: env unset → thinking left on → no extra_body injected.
+        monkeypatch.delenv("TRADINGAGENTS_DISABLE_KIMI_THINKING", raising=False)
+        kwargs = self._build_kwargs(monkeypatch, "moonshotai/Kimi-K2.6")
+        # If model_kwargs is set at all, it must not have rewritten extra_body.
+        mk = kwargs.get("model_kwargs", {})
+        extra = mk.get("extra_body", {})
+        assert "chat_template_kwargs" not in extra
+
+    def test_env_truthy_injects_thinking_false_for_kimi(self, monkeypatch):
+        monkeypatch.setenv("TRADINGAGENTS_DISABLE_KIMI_THINKING", "1")
+        kwargs = self._build_kwargs(monkeypatch, "moonshotai/Kimi-K2.6")
+        extra = kwargs["model_kwargs"]["extra_body"]
+        assert extra["chat_template_kwargs"] == {"thinking": False}
+
+    def test_env_truthy_does_not_affect_non_kimi(self, monkeypatch):
+        """Scope is Kimi-only. Qwen has its own degeneracy issues that have
+        nothing to do with reasoning_content and must not see the toggle."""
+        monkeypatch.setenv("TRADINGAGENTS_DISABLE_KIMI_THINKING", "1")
+        kwargs = self._build_kwargs(
+            monkeypatch, "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+        )
+        mk = kwargs.get("model_kwargs", {})
+        extra = mk.get("extra_body", {})
+        assert "chat_template_kwargs" not in extra
+
+    def test_env_falsy_does_not_inject(self, monkeypatch):
+        monkeypatch.setenv("TRADINGAGENTS_DISABLE_KIMI_THINKING", "0")
+        kwargs = self._build_kwargs(monkeypatch, "moonshotai/Kimi-K2.6")
+        mk = kwargs.get("model_kwargs", {})
+        extra = mk.get("extra_body", {})
+        assert "chat_template_kwargs" not in extra
+
+    def test_user_supplied_extra_body_is_merged_not_clobbered(self, monkeypatch):
+        """Caller passes their own extra_body for something unrelated — the
+        toggle injection must preserve it alongside the chat_template_kwargs
+        addition."""
+        monkeypatch.setenv("TRADINGAGENTS_DISABLE_KIMI_THINKING", "1")
+        kwargs = self._build_kwargs(
+            monkeypatch,
+            "moonshotai/Kimi-K2.6",
+            model_kwargs={"extra_body": {"top_logprobs": 5}},
+        )
+        extra = kwargs["model_kwargs"]["extra_body"]
+        # Both keys present, neither rewritten.
+        assert extra["top_logprobs"] == 5
+        assert extra["chat_template_kwargs"] == {"thinking": False}
+
