@@ -95,7 +95,10 @@ def _parse_etime(etime: str) -> "timedelta":
         if len(parts) == 3:
             h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
             return timedelta(days=days, hours=h, minutes=m, seconds=s)
-    except ValueError:
+    except (ValueError, OverflowError):
+        # OverflowError fires when ``days`` exceeds ``timedelta``'s 10^9
+        # ceiling. We saw that in prod when a transient procfs race made
+        # a fresh process's etime look astronomical.
         return timedelta(0)
     return timedelta(0)
 
@@ -160,7 +163,14 @@ def _scan_runner_processes() -> list[dict[str, Any]]:
         except ValueError:
             continue
         tickers, workers = _parse_runner_cmdline(cmd)
-        started_at = (now - _parse_etime(etime_str)).isoformat(timespec="seconds")
+        try:
+            started_at = (now - _parse_etime(etime_str)).isoformat(timespec="seconds")
+        except OverflowError:
+            # A transient procfs race after fork has been seen to make a
+            # fresh process's etime parse to an astronomical delta, which
+            # then pushes ``now - delta`` below ``datetime.min``. A single
+            # bad row should not poison the whole scan.
+            continue
         rows.append({
             "pid": pid,
             "started_at": started_at,
@@ -407,7 +417,13 @@ def stop_run(pid: int) -> bool:
         return False
 
 
-def read_log_tail(path: str, n: int = 30) -> str:
+def read_log_tail(path: Optional[str], n: int = 30) -> str:
+    # Orphan rows (a runner discovered via ``ps`` with no entry in the
+    # on-disk index) have ``log_path=None``. Returning ``""`` lets the
+    # frontend's poll keep working until the entry is reconciled or the
+    # process exits, instead of 500ing on ``open(None)``.
+    if not path:
+        return ""
     try:
         with open(path) as fh:
             return "".join(fh.readlines()[-n:])
