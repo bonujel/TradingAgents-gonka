@@ -117,8 +117,11 @@ def _write_cache(tickers: List[str]) -> None:
 
 
 def _fetch_from_wikipedia() -> List[str]:
-    # Wikipedia returns 403 to pandas' default urllib User-Agent, so fetch with
-    # requests + a real UA and hand the HTML to pandas.
+    # Wikipedia 403s pandas' default urllib UA, and 2026-05 prod observation
+    # showed it also rate-limits our own "TradingAgents-gonka/1.0 (...)" UA
+    # once a server's IP racks up failures (each silent fallback to the static
+    # list re-triggers a Wikipedia fetch on the next call, accelerating the
+    # rate-limit). Sending a real browser UA sidesteps both.
     import io
 
     import pandas as pd
@@ -126,7 +129,12 @@ def _fetch_from_wikipedia() -> List[str]:
 
     resp = requests.get(
         _WIKIPEDIA_SP500_URL,
-        headers={"User-Agent": "TradingAgents-gonka/1.0 (S&P500 universe fetch)"},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        },
         timeout=15,
     )
     resp.raise_for_status()
