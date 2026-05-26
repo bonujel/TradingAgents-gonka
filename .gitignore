@@ -229,6 +229,9 @@ __marimo__/
 log-back.log
 log-front.log
 
+# Pidfiles tracked by start.sh (one per service so stop_all kills the right PID)
+.run/
+
 # Claude Code CLI internal state (per-session lock + cache); not part
 # of the project, created at $REPO_ROOT/.claude/ by the Claude Code
 # harness when tools like ScheduleWakeup run.

@@ -30,17 +30,61 @@ FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 BACK_LOG="$REPO_DIR/log-back.log"
 FRONT_LOG="$REPO_DIR/log-front.log"
 
+# Pidfiles live under $REPO_DIR/.run so each repo clone tracks its own
+# processes (and stop_all from this clone never touches another clone's).
+# Old layouts used unscoped ``pkill -f "uvicorn app.api"``-style patterns
+# which would happily kill an unrelated uvicorn / Nuxt service running on
+# the same box.
+RUN_DIR="$REPO_DIR/.run"
+BACKEND_PID_FILE="$RUN_DIR/backend.pid"
+FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 log() { printf '\033[0;36m[start.sh]\033[0m %s\n' "$*"; }
 
+# Kill ``pid`` only when it is still alive AND its /proc/<pid>/cmdline
+# contains ``sentinel``. The sentinel guards against PID reuse: between our
+# launch and our stop the kernel may have recycled the pid into an
+# unrelated process — without the cmdline check we would happily ``kill``
+# that bystander.
+kill_if_owns() {
+  local pid="$1" sentinel="$2"
+  [ -n "$pid" ] || return 0
+  [ -e "/proc/$pid" ] || return 0
+  if grep -q -- "$sentinel" "/proc/$pid/cmdline" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+  fi
+}
+
 stop_all() {
   log "Stopping backend, frontend, and analysis subprocesses..."
-  # `|| true` — pkill exits non-zero when nothing matched, which is fine.
-  pkill -f "uvicorn app.api"               2>/dev/null || true  # backend
-  pkill -f "app\.runner"                   2>/dev/null || true  # detached analysis runs
-  pkill -f "\.output/server/index\.mjs"    2>/dev/null || true  # frontend prod (current)
-  pkill -f "nuxt dev"                      2>/dev/null || true  # frontend dev (legacy, just in case)
-  pkill -f "npm run dev"                   2>/dev/null || true  # frontend dev npm wrapper (legacy)
+
+  # Backend + frontend: kill by recorded PID, after verifying the cmdline.
+  if [ -f "$BACKEND_PID_FILE" ]; then
+    kill_if_owns "$(cat "$BACKEND_PID_FILE")" "uvicorn"
+    rm -f "$BACKEND_PID_FILE"
+  fi
+  if [ -f "$FRONTEND_PID_FILE" ]; then
+    kill_if_owns "$(cat "$FRONTEND_PID_FILE")" "index.mjs"
+    rm -f "$FRONTEND_PID_FILE"
+  fi
+
+  # app.runner subprocesses are spawned detached by the backend, so we
+  # don't own their PIDs at restart time. Scope by /proc/<pid>/cwd: only
+  # kill app.runner processes whose working directory IS this clone, so a
+  # second clone of TradingAgents on the same box keeps running.
+  if pgrep -f "app\.runner" >/dev/null 2>&1; then
+    for pid in $(pgrep -f "app\.runner" 2>/dev/null); do
+      if [ -e "/proc/$pid/cwd" ]; then
+        local cwd
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+        if [ "$cwd" = "$REPO_DIR" ]; then
+          kill "$pid" 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
+
   # Give the OS a moment to release the listening ports.
   sleep 2
   # Drop the stale active-task index so the next backend boot starts clean.
@@ -94,12 +138,15 @@ fi
 stop_all
 activate_conda
 
+mkdir -p "$RUN_DIR"
+
 log "Starting backend on http://${BACKEND_HOST}:${BACKEND_PORT} ..."
 cd "$REPO_DIR"
 nohup uvicorn app.api:app \
   --host "$BACKEND_HOST" --port "$BACKEND_PORT" --log-level info \
   > "$BACK_LOG" 2>&1 &
 BACKEND_PID=$!
+echo "$BACKEND_PID" > "$BACKEND_PID_FILE"
 log "Backend PID $BACKEND_PID — log: $BACK_LOG"
 
 log "Building frontend (nuxt build → .output/) ..."
@@ -121,6 +168,7 @@ log "Starting frontend on http://${FRONTEND_HOST}:${FRONTEND_PORT} (production N
 NITRO_HOST="$FRONTEND_HOST" NITRO_PORT="$FRONTEND_PORT" \
   nohup node .output/server/index.mjs >> "$FRONT_LOG" 2>&1 &
 FRONTEND_PID=$!
+echo "$FRONTEND_PID" > "$FRONTEND_PID_FILE"
 log "Frontend PID $FRONTEND_PID — log: $FRONT_LOG"
 
 # ─── Health checks ──────────────────────────────────────────────────────────
