@@ -192,12 +192,32 @@ def list_dates() -> list[str]:
 
 @app.get("/api/decisions")
 def list_decisions(
-    date: Optional[str] = Query(default=None),
+    date: str = Query(...),
     ticker: Optional[str] = Query(default=None),
-    limit: int = Query(default=500, ge=1, le=2000),
-) -> list[dict[str, Any]]:
-    rows = db.list_decisions(trade_date=date, ticker=ticker, limit=limit)
-    return [_row_to_dict(r) for r in rows]
+    rating: Optional[str] = Query(default=None),
+    model: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+) -> dict[str, Any]:
+    rows, total = db.list_decisions_summary(
+        trade_date=date,
+        ticker=ticker,
+        rating=rating,
+        deep_model=model,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "rows": [_row_to_dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/api/decisions/models")
+def list_decision_models(date: str = Query(...)) -> list[str]:
+    return db.list_distinct_models(trade_date=date)
 
 
 @app.get("/api/decisions/{ticker}/{trade_date}")

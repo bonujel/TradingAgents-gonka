@@ -234,6 +234,79 @@ def list_run_dates(*, path: Optional[Path] = None) -> list[str]:
         return [r["trade_date"] for r in rows]
 
 
+def list_distinct_models(
+    *, trade_date: str, path: Optional[Path] = None
+) -> list[str]:
+    """Distinct ``deep_model`` values recorded for ``trade_date``.
+
+    Used by the dashboard's model-filter dropdown so the menu reflects what
+    actually ran that day rather than every model ever used.
+    """
+    with connect(path) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT deep_model
+              FROM decisions
+             WHERE trade_date = ? AND deep_model IS NOT NULL
+             ORDER BY deep_model ASC
+            """,
+            (trade_date,),
+        ).fetchall()
+        return [r["deep_model"] for r in rows]
+
+
+def list_decisions_summary(
+    *,
+    trade_date: str,
+    ticker: Optional[str] = None,
+    rating: Optional[str] = None,
+    deep_model: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    path: Optional[Path] = None,
+) -> tuple[list[sqlite3.Row], int]:
+    """Return ``(rows, total)`` for the decision dashboard list view.
+
+    Rows exclude the markdown blob columns (``final_decision``, the four
+    analyst reports, ``investment_plan``, ``trader_plan``) — those are
+    fetched on demand by the detail endpoint. ``total`` is the unpaginated
+    count, used by the UI to render page numbers.
+    """
+    clauses: list[str] = ["trade_date = ?"]
+    params: list[Any] = [trade_date]
+    if ticker:
+        clauses.append("ticker = ?")
+        params.append(ticker.upper())
+    if rating:
+        clauses.append("rating = ?")
+        params.append(rating)
+    if deep_model:
+        clauses.append("deep_model = ?")
+        params.append(deep_model)
+    where = " AND ".join(clauses)
+
+    offset = (page - 1) * page_size
+    with connect(path) as conn:
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM decisions WHERE {where}", params
+        ).fetchone()
+        total = int(total_row["n"])
+        rows = list(
+            conn.execute(
+                f"""
+                SELECT id, ticker, trade_date, rating, deep_model, created_at,
+                       (error IS NOT NULL) AS has_error
+                  FROM decisions
+                 WHERE {where}
+                 ORDER BY trade_date DESC, ticker ASC
+                 LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, offset],
+            )
+        )
+    return rows, total
+
+
 def list_runs(*, limit: int = 50, path: Optional[Path] = None) -> list[sqlite3.Row]:
     with connect(path) as conn:
         return list(
