@@ -16,10 +16,13 @@ Override mechanisms (in priority order):
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import time
 from pathlib import Path
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 _TOP_BY_MARKET_CAP: List[str] = [
@@ -141,11 +144,15 @@ def _write_cache(names: dict[str, str]) -> None:
 def _fetch_from_wikipedia() -> dict[str, str]:
     """Scrape Wikipedia's S&P 500 page and return ``{ticker: security_name}``.
 
-    Wikipedia 403s pandas' default urllib UA, and 2026-05 prod observation
-    showed it also rate-limits our own ``TradingAgents-gonka/1.0 (...)`` UA
-    once a server's IP racks up failures (each silent fallback to the
-    static list re-triggers a Wikipedia fetch on the next call,
-    accelerating the rate-limit). Sending a real browser UA sidesteps both.
+    Sending only a browser User-Agent is not enough — 2026-05 prod
+    observation: ``curl`` with the same UA returned 200, but
+    ``requests.get`` with that UA returned 403 "Too Many Reqs" from the
+    same machine seconds later. Cloudflare's bot fingerprinter scores
+    the entire header set (Accept / Accept-Language / Accept-Encoding /
+    Sec-Fetch-* / Connection / Upgrade-Insecure-Requests), and the
+    requests-library defaults look bot-like enough to trip it once an IP
+    has any prior failure history. Sending the full Chrome-on-Linux
+    header set sidesteps that fingerprint.
     """
     import io
 
@@ -159,6 +166,18 @@ def _fetch_from_wikipedia() -> dict[str, str]:
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "Connection": "keep-alive",
         },
         timeout=15,
     )
@@ -207,8 +226,16 @@ def get_sp500_tickers(force_refresh: bool = False) -> List[str]:
         if names:
             _write_cache(names)
             return list(names.keys())
-    except Exception:  # noqa: BLE001 — UI button must never blow up the app
-        pass
+    except Exception as exc:  # noqa: BLE001 — UI button must never blow up the app
+        # Used to be ``pass``; an outage looked identical to "everything fine
+        # but only 30 tickers". Log loudly so the operator can spot Cloudflare
+        # / DNS / cert / parsing regressions instead of guessing why "Full
+        # S&P 500" silently degrades.
+        logger.warning(
+            "S&P 500 Wikipedia scrape failed (%s: %s); "
+            "falling back to %d-ticker static list",
+            type(exc).__name__, exc, len(_TOP_BY_MARKET_CAP),
+        )
 
     return list(_TOP_BY_MARKET_CAP)
 
@@ -234,7 +261,11 @@ def get_sp500_names(force_refresh: bool = False) -> dict[str, str]:
         if names:
             _write_cache(names)
             return names
-    except Exception:  # noqa: BLE001 — endpoint must never blow up the app
-        pass
+    except Exception as exc:  # noqa: BLE001 — endpoint must never blow up the app
+        logger.warning(
+            "S&P 500 names Wikipedia scrape failed (%s: %s); "
+            "falling back to ticker-as-name for %d static entries",
+            type(exc).__name__, exc, len(_TOP_BY_MARKET_CAP),
+        )
 
     return {t: t for t in _TOP_BY_MARKET_CAP}
