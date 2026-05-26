@@ -17,6 +17,7 @@ from app.tasks import (
     _parse_runner_cmdline,
     _scan_runner_processes,
     list_active,
+    read_log_tail,
 )
 
 
@@ -81,6 +82,13 @@ def test_parse_etime_returns_zero_on_garbage():
     assert _parse_etime("not-a-time") == timedelta(0)
 
 
+def test_parse_etime_returns_zero_when_days_overflows_timedelta():
+    """``timedelta`` rejects |days| > 999999999. The caller must never see
+    that ``OverflowError`` — a single nonsense ``ps`` row should degrade to
+    ``timedelta(0)``, same as any other unparseable input."""
+    assert _parse_etime("99999999999-00:00:00") == timedelta(0)
+
+
 def _fake_ps_output(rows: list[tuple[str, str, str, str]]) -> str:
     """Build a fake `ps -A -o pid=,etime=,stat=,command=` block."""
     return "\n".join(f"{pid} {etime} {stat} {cmd}" for pid, etime, stat, cmd in rows)
@@ -127,6 +135,28 @@ def test_scan_runner_processes_computes_started_at_iso():
 def test_scan_runner_processes_returns_empty_on_ps_failure():
     with patch("app.tasks._run_ps_scan", return_value=None):
         assert _scan_runner_processes() == []
+
+
+def test_scan_runner_processes_isolates_overflowing_row():
+    """A single ``ps`` row whose etime makes ``now - delta`` underflow
+    ``datetime.min`` must not poison the whole scan. The bad row is
+    dropped; the good row is still returned.
+
+    The 999999998-day etime is within ``timedelta``'s 10^9-day ceiling
+    (so ``_parse_etime`` returns it as-is) but far enough back to push
+    a 2026-era ``now`` below year 1 on subtraction.
+    """
+    fake = _fake_ps_output([
+        ("100", "00:05", "S", "/usr/bin/python -m app.runner -j 8 NVDA"),
+        ("999", "999999998-00:00:00", "S", "/usr/bin/python -m app.runner MSFT"),
+    ])
+    fixed_now = datetime(2026, 5, 26, 12, 0, 0)
+    with patch("app.tasks._run_ps_scan", return_value=fake), \
+         patch("app.tasks._utc_now_naive", return_value=fixed_now):
+        rows = _scan_runner_processes()
+    pids = [r["pid"] for r in rows]
+    assert 100 in pids
+    assert 999 not in pids
 
 
 @pytest.fixture
@@ -242,6 +272,16 @@ def test_dedup_window_seconds_default():
 def test_dedup_window_seconds_env_override(monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_APP_DEDUP_WINDOW_SECONDS", "30")
     assert _dedup_window_seconds() == 30
+
+
+def test_read_log_tail_returns_empty_for_none_path():
+    """``list_active`` flags orphan-runner entries with ``log_path=None``.
+    The log-tail endpoint must not propagate that into ``open(None)``."""
+    assert read_log_tail(None) == ""
+
+
+def test_read_log_tail_returns_empty_for_missing_file(tmp_path):
+    assert read_log_tail(str(tmp_path / "nonexistent.log")) == ""
 
 
 def test_api_returns_409_on_recent_duplicate(monkeypatch):
