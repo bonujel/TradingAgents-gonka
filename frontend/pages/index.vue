@@ -7,13 +7,22 @@
           Latest agent verdicts persisted from completed runs.
         </p>
       </div>
-      <button class="btn" :disabled="loading" @click="reloadAll">
-        <span v-if="loading">Refreshing…</span>
-        <span v-else>Refresh</span>
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+          class="btn"
+          type="button"
+          @click="briefExpanded = !briefExpanded"
+        >
+          {{ briefExpanded ? "Collapse Brief" : "Expand Brief" }}
+        </button>
+        <button class="btn" :disabled="loading" @click="reloadAll">
+          <span v-if="loading">Refreshing…</span>
+          <span v-else>Refresh</span>
+        </button>
+      </div>
     </header>
 
-    <section class="grid gap-4 sm:grid-cols-3">
+    <section v-if="briefExpanded" class="grid gap-4 sm:grid-cols-3">
       <MetricCard label="Trade dates" :value="dates.length" hint="Calendar days on record" />
       <MetricCard label="Matching" :value="total" hint="Rows for current filter" />
       <MetricCard label="Page size" :value="pageSize" hint="Rows per request" />
@@ -182,6 +191,14 @@ const loading = ref(false);
 const loadError = ref<string | null>(null);
 const modelsError = ref<string | null>(null);
 
+// Brief = the three "Trade dates / Matching / Page size" stat cards. Off
+// by default (most operators just want the row list); preference persists
+// in localStorage so a user who flips it on once doesn't have to redo it
+// on every visit. SSR ships the collapsed state; onMounted reads the
+// stored preference and snaps to it.
+const BRIEF_STORAGE_KEY = "decisions.brief.expanded";
+const briefExpanded = ref(false);
+
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
 
 function pushQuery() {
@@ -333,5 +350,16 @@ async function reloadAll() {
   }
 }
 
-onMounted(reloadAll);
+onMounted(() => {
+  if (typeof window !== "undefined") {
+    briefExpanded.value = window.localStorage.getItem(BRIEF_STORAGE_KEY) === "1";
+  }
+  reloadAll();
+});
+
+watch(briefExpanded, (v) => {
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(BRIEF_STORAGE_KEY, v ? "1" : "0");
+  }
+});
 </script>
