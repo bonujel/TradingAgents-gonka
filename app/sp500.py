@@ -92,36 +92,61 @@ _CACHE_PATH = Path.home() / ".tradingagents" / "cache" / "sp500_constituents.csv
 _CACHE_TTL_SECONDS = 7 * 24 * 3600  # refresh weekly
 
 
-def _read_cache() -> List[str] | None:
+def _read_cache_with_names() -> dict[str, str] | None:
+    """Read the cache as a ``{ticker: security_name}`` mapping.
+
+    Returns ``None`` when the cache is missing, stale, malformed, or in the
+    legacy single-column format (so the caller will re-scrape and rewrite
+    in the new 2-column layout — old caches don't need to be deleted by hand).
+    """
     if not _CACHE_PATH.exists():
         return None
     if time.time() - _CACHE_PATH.stat().st_mtime > _CACHE_TTL_SECONDS:
         return None
     try:
         with _CACHE_PATH.open(newline="") as fh:
-            rows = [row[0].strip() for row in csv.reader(fh) if row and row[0].strip()]
-        return rows or None
+            out: dict[str, str] = {}
+            for row in csv.reader(fh):
+                if not row or not row[0].strip():
+                    continue
+                if len(row) < 2:
+                    return None  # legacy 1-col cache — re-scrape
+                ticker = row[0].strip()
+                name = row[1].strip()
+                if ticker:
+                    out[ticker] = name or ticker
+        return out or None
     except (OSError, csv.Error):
         return None
 
 
-def _write_cache(tickers: List[str]) -> None:
+def _read_cache() -> List[str] | None:
+    """Backwards-compat wrapper that exposes just the ticker list."""
+    d = _read_cache_with_names()
+    return list(d.keys()) if d else None
+
+
+def _write_cache(names: dict[str, str]) -> None:
+    """Persist the ``{ticker: name}`` mapping as 2-column CSV."""
     try:
         _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with _CACHE_PATH.open("w", newline="") as fh:
             writer = csv.writer(fh)
-            for t in tickers:
-                writer.writerow([t])
+            for ticker, name in names.items():
+                writer.writerow([ticker, name])
     except OSError:
         pass  # cache is best-effort; the caller already has the data
 
 
-def _fetch_from_wikipedia() -> List[str]:
-    # Wikipedia 403s pandas' default urllib UA, and 2026-05 prod observation
-    # showed it also rate-limits our own "TradingAgents-gonka/1.0 (...)" UA
-    # once a server's IP racks up failures (each silent fallback to the static
-    # list re-triggers a Wikipedia fetch on the next call, accelerating the
-    # rate-limit). Sending a real browser UA sidesteps both.
+def _fetch_from_wikipedia() -> dict[str, str]:
+    """Scrape Wikipedia's S&P 500 page and return ``{ticker: security_name}``.
+
+    Wikipedia 403s pandas' default urllib UA, and 2026-05 prod observation
+    showed it also rate-limits our own ``TradingAgents-gonka/1.0 (...)`` UA
+    once a server's IP racks up failures (each silent fallback to the
+    static list re-triggers a Wikipedia fetch on the next call,
+    accelerating the rate-limit). Sending a real browser UA sidesteps both.
+    """
     import io
 
     import pandas as pd
@@ -143,9 +168,15 @@ def _fetch_from_wikipedia() -> List[str]:
         raise RuntimeError("S&P 500 table not found on Wikipedia page")
     df = tables[0]
     symbols = df["Symbol"].astype(str).str.strip().tolist()
-    # Wikipedia renders BRK.B / BF.B with a dot; keep that convention to match
-    # the existing static list in ``_TOP_BY_MARKET_CAP``.
-    return [s for s in symbols if s]
+    # "Security" is the company name column on the Wikipedia table; fall back
+    # to ticker when the cell is missing or non-string. Wikipedia renders
+    # BRK.B / BF.B with a dot, matching ``_TOP_BY_MARKET_CAP`` convention.
+    securities = (
+        df["Security"].astype(str).str.strip().tolist()
+        if "Security" in df.columns
+        else symbols
+    )
+    return {s: n or s for s, n in zip(symbols, securities) if s}
 
 
 def get_sp500_tickers(force_refresh: bool = False) -> List[str]:
@@ -172,11 +203,38 @@ def get_sp500_tickers(force_refresh: bool = False) -> List[str]:
             return cached
 
     try:
-        tickers = _fetch_from_wikipedia()
-        if tickers:
-            _write_cache(tickers)
-            return tickers
+        names = _fetch_from_wikipedia()
+        if names:
+            _write_cache(names)
+            return list(names.keys())
     except Exception:  # noqa: BLE001 — UI button must never blow up the app
         pass
 
     return list(_TOP_BY_MARKET_CAP)
+
+
+def get_sp500_names(force_refresh: bool = False) -> dict[str, str]:
+    """Return ``{ticker: company_name}`` for the full S&P 500 universe.
+
+    Same lookup order as :func:`get_sp500_tickers` — env var → cache →
+    Wikipedia → static fallback. On the final fallback, names default to
+    the ticker so callers never see ``None`` for a known ticker.
+    """
+    env_list = _from_env()
+    if env_list is not None:
+        return {t: t for t in env_list}
+
+    if not force_refresh:
+        cached = _read_cache_with_names()
+        if cached is not None:
+            return cached
+
+    try:
+        names = _fetch_from_wikipedia()
+        if names:
+            _write_cache(names)
+            return names
+    except Exception:  # noqa: BLE001 — endpoint must never blow up the app
+        pass
+
+    return {t: t for t in _TOP_BY_MARKET_CAP}

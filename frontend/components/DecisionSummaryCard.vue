@@ -4,6 +4,7 @@
     class="block rounded-lg border border-gonka-border bg-gonka-surface px-5 py-3 transition hover:border-emerald-500/40 hover:bg-gonka-surface/80"
   >
     <div class="flex flex-wrap items-center gap-3">
+      <!-- Left group: ticker · rating · (errored?) · company name · trade date -->
       <h3 class="font-mono text-lg font-semibold tracking-tight text-white">
         {{ row.ticker }}
       </h3>
@@ -14,9 +15,12 @@
       >
         errored
       </span>
+      <span class="truncate text-sm text-gonka-muted">{{ companyName }}</span>
       <span class="chip">{{ row.trade_date }}</span>
-      <span class="chip">{{ shortModel }}</span>
-      <span class="ml-auto text-xs text-gonka-muted">
+
+      <!-- Right group: model · stored timestamp -->
+      <span class="ml-auto chip">{{ shortModel }}</span>
+      <span class="text-xs text-gonka-muted">
         stored {{ shortTimestamp(row.created_at) }}
       </span>
     </div>
@@ -27,6 +31,13 @@
 import type { DecisionSummaryRow } from "~/composables/useApi";
 
 const props = defineProps<{ row: DecisionSummaryRow }>();
+
+const tickerNames = useTickerNamesStore();
+onMounted(() => tickerNames.ensureLoaded());
+
+// Falls back to the ticker itself when the name map hasn't loaded yet or
+// the ticker is outside the S&P 500 universe.
+const companyName = computed(() => tickerNames.lookup(props.row.ticker));
 
 const shortModel = computed(() => {
   const m = props.row.deep_model;

@@ -31,7 +31,12 @@ from .settings_store import (
     public_view,
     save_settings,
 )
-from .sp500 import get_sp100_tickers, get_sp500_tickers, get_top_tickers
+from .sp500 import (
+    get_sp100_tickers,
+    get_sp500_names,
+    get_sp500_tickers,
+    get_top_tickers,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -335,6 +340,17 @@ def tickers_sp100() -> list[str]:
 @app.get("/api/tickers/sp500", dependencies=[Depends(auth.require_admin)])
 def tickers_full() -> list[str]:
     return get_sp500_tickers()
+
+
+@app.get("/api/tickers/names")
+def tickers_names() -> dict[str, str]:
+    """Return ``{ticker: company_name}`` for the S&P 500 universe.
+
+    Open to every authenticated user — the Decisions page renders the name
+    alongside each row, and Decisions is the one page normal users CAN see.
+    Read-only and the data is public (Wikipedia); no admin gate.
+    """
+    return get_sp500_names()
 
 
 # ─── Health ───────────────────────────────────────────────────────────────

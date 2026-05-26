@@ -1,19 +1,23 @@
 <template>
   <article class="card overflow-hidden">
     <header class="flex flex-wrap items-center gap-3 border-b border-gonka-border px-5 py-4">
+      <!-- Left group: ticker · rating · company name · trade date -->
       <div class="flex items-baseline gap-2">
         <h3 class="font-mono text-xl font-semibold tracking-tight text-white">
           {{ row.ticker }}
         </h3>
         <RatingBadge :rating="row.rating" />
       </div>
+      <span class="truncate text-sm text-gonka-muted">{{ companyName }}</span>
       <span class="chip">
         {{ row.trade_date }}
       </span>
-      <span class="chip">
+
+      <!-- Right group: model · stored timestamp -->
+      <span class="ml-auto chip">
         {{ shortModel }}
       </span>
-      <span class="ml-auto text-xs text-gonka-muted">
+      <span class="text-xs text-gonka-muted">
         stored {{ shortTimestamp(row.created_at) }}
       </span>
     </header>
@@ -78,6 +82,13 @@
 import type { DecisionRow } from "~/composables/useApi";
 
 const props = defineProps<{ row: DecisionRow }>();
+
+const tickerNames = useTickerNamesStore();
+onMounted(() => tickerNames.ensureLoaded());
+
+// Falls back to the ticker itself when the name map hasn't loaded yet
+// or the ticker is outside the S&P 500 universe.
+const companyName = computed(() => tickerNames.lookup(props.row.ticker));
 
 const analystReports = computed(() => [
   { key: "market", label: "Market", body: props.row.market_report },

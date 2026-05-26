@@ -253,5 +253,6 @@ export function useApi() {
     topTickers: (n = 20) => request<string[]>("/api/tickers/top", { params: { n } }),
     sp100Tickers: () => request<string[]>("/api/tickers/sp100"),
     sp500Tickers: () => request<string[]>("/api/tickers/sp500"),
+    tickerNames: () => request<Record<string, string>>("/api/tickers/names"),
   };
 }
