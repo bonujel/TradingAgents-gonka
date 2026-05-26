@@ -4,6 +4,23 @@
  */
 import type { FetchOptions } from "ofetch";
 
+export interface DecisionSummaryRow {
+  id: number;
+  ticker: string;
+  trade_date: string;
+  rating: string | null;
+  deep_model: string | null;
+  created_at: string;
+  has_error: number; // SQLite returns 0/1, treat as boolean at call sites
+}
+
+export interface DecisionListResponse {
+  rows: DecisionSummaryRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface DecisionRow {
   id: number;
   ticker: string;
@@ -207,8 +224,16 @@ export function useApi() {
     putSettings: (body: SettingsUpdate) =>
       request<SettingsResponse>("/api/settings", { method: "PUT", body }),
     listDates: () => request<string[]>("/api/decisions/dates"),
-    listDecisions: (params: { date?: string; ticker?: string; limit?: number }) =>
-      request<DecisionRow[]>("/api/decisions", { params }),
+    listDecisions: (params: {
+      date: string;
+      ticker?: string;
+      rating?: string;
+      model?: string;
+      page?: number;
+      page_size?: number;
+    }) => request<DecisionListResponse>("/api/decisions", { params }),
+    listDecisionModels: (date: string) =>
+      request<string[]>("/api/decisions/models", { params: { date } }),
     getDecision: (ticker: string, tradeDate: string) =>
       request<DecisionRow>(`/api/decisions/${encodeURIComponent(ticker)}/${tradeDate}`),
     listActiveRuns: () => request<ActiveTask[]>("/api/runs/active"),
