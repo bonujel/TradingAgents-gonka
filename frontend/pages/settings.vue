@@ -183,10 +183,9 @@
               class="input"
             />
             <p class="mt-1 text-xs text-gonka-muted">
-              Per-call <code>max_tokens</code> cap for Qwen-family models. Gonka's
-              FP8 Qwen serving has a deterministic degeneration bug at certain
-              values (notably 256, 2048, 4000, 8000, ≥8192) — default 4096 was
-              empirically safe in the 2026-05-23 sweep.
+              Per-call <code>max_tokens</code> for Qwen. Default 4096 — other
+              values (256 / 2048 / 4000 / 8000 / ≥8192) trigger an FP8
+              degeneration bug.
             </p>
           </div>
           <div>
@@ -199,10 +198,9 @@
               class="input"
             />
             <p class="mt-1 text-xs text-gonka-muted">
-              Per-call <code>max_tokens</code> cap for Kimi-K2.6. Needs the full
-              8192 because Kimi streams its CoT through the same SSE channel
-              before any visible content — a tight cap stalls
-              LangChain's stream aggregator.
+              Per-call <code>max_tokens</code> for Kimi-K2.6. Keep ≥8192:
+              CoT streams before visible content, a tight cap stalls
+              LangChain's aggregator.
             </p>
           </div>
         </div>
@@ -215,13 +213,10 @@
           <div class="text-sm">
             <div class="font-semibold text-gonka-text">Disable Kimi thinking (faster, no CoT)</div>
             <p class="mt-1 text-xs text-gonka-muted">
-              Send <code class="font-mono">chat_template_kwargs.thinking=false</code>
-              to Gonka for Kimi-family models so the backend skips
-              reasoning_content. Verified 2026-05-25: reasoning length drops to
-              0 and <code>completion_tokens</code> falls roughly 75%, with the
-              freed budget redirected to the visible answer. Off by default;
-              flip on once you've confirmed your prompts don't rely on
-              Kimi's chain-of-thought.
+              Tells Gonka to skip Kimi's CoT (sends
+              <code class="font-mono">thinking=false</code>). ~75% fewer
+              completion tokens, faster answers. Only enable if your
+              prompts don't need Kimi's reasoning.
             </p>
           </div>
         </label>
