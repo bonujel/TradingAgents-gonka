@@ -142,28 +142,31 @@ const profileIcon = () =>
     ]
   );
 
-const items = [
-  {
-    to: "/",
-    label: "Decisions",
-    icon: () =>
-      h(
-        "svg",
-        { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8 },
-        [
-          h("path", {
-            d: "M3 3v18h18",
-            "stroke-linecap": "round",
-            "stroke-linejoin": "round",
-          }),
-          h("path", {
-            d: "M7 14l3-3 3 3 5-6",
-            "stroke-linecap": "round",
-            "stroke-linejoin": "round",
-          }),
-        ]
-      ),
-  },
+const decisionsItem = {
+  to: "/",
+  label: "Decisions",
+  icon: () =>
+    h(
+      "svg",
+      { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8 },
+      [
+        h("path", {
+          d: "M3 3v18h18",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        }),
+        h("path", {
+          d: "M7 14l3-3 3 3 5-6",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        }),
+      ]
+    ),
+};
+
+// Tasks / Schedule / Settings are super-admin only — normal users get
+// the read-only Decisions view plus their Personal Settings.
+const adminOnlyItems = [
   {
     to: "/tasks",
     label: "Tasks",
@@ -214,12 +217,21 @@ const items = [
   },
 ];
 
-// Account Management is super-admin only; Personal Settings is shown to
-// normal users only (the super admin's password rotates on restart).
+// Normal users only see Decisions + Personal Settings. Super admin sees
+// the full operator console (Tasks / Schedule / Settings + Account
+// Management). Personal Settings is hidden for the super admin because
+// its password rotates on restart and there is nothing to change.
 const navItems = computed(() => {
-  const extra = auth.isAdmin
-    ? [{ to: "/account", label: "Account Management", icon: accountIcon }]
-    : [{ to: "/profile", label: "Personal Settings", icon: profileIcon }];
-  return [...items, ...extra];
+  if (auth.isAdmin) {
+    return [
+      decisionsItem,
+      ...adminOnlyItems,
+      { to: "/account", label: "Account Management", icon: accountIcon },
+    ];
+  }
+  return [
+    decisionsItem,
+    { to: "/profile", label: "Personal Settings", icon: profileIcon },
+  ];
 });
 </script>

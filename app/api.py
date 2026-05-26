@@ -142,12 +142,12 @@ def get_info() -> dict[str, Any]:
     }
 
 
-@app.get("/api/settings")
+@app.get("/api/settings", dependencies=[Depends(auth.require_admin)])
 def get_settings() -> dict[str, Any]:
     return public_view(load_settings())
 
 
-@app.put("/api/settings")
+@app.put("/api/settings", dependencies=[Depends(auth.require_admin)])
 def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     """Update settings.
 
@@ -231,12 +231,12 @@ def get_decision(ticker: str, trade_date: str) -> dict[str, Any]:
 # ─── Runs ─────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/runs/active")
+@app.get("/api/runs/active", dependencies=[Depends(auth.require_admin)])
 def list_active_runs() -> list[dict[str, Any]]:
     return [tasks.task_with_runtime(t) for t in tasks.list_active()]
 
 
-@app.post("/api/runs", status_code=201)
+@app.post("/api/runs", status_code=201, dependencies=[Depends(auth.require_admin)])
 def start_run(req: RunRequest) -> dict[str, Any]:
     settings = load_settings()
     if not mode_is_configured(settings):
@@ -269,7 +269,7 @@ def start_run(req: RunRequest) -> dict[str, Any]:
     return tasks.task_with_runtime(task)
 
 
-@app.delete("/api/runs/{pid}")
+@app.delete("/api/runs/{pid}", dependencies=[Depends(auth.require_admin)])
 def stop_run(pid: int) -> dict[str, Any]:
     ok = tasks.stop_run(pid)
     if not ok:
@@ -277,7 +277,7 @@ def stop_run(pid: int) -> dict[str, Any]:
     return {"pid": pid, "stopped": True}
 
 
-@app.get("/api/runs/{pid}/log")
+@app.get("/api/runs/{pid}/log", dependencies=[Depends(auth.require_admin)])
 def read_log(pid: int, lines: int = Query(default=30, ge=1, le=2000)) -> dict[str, Any]:
     """Return the tail of a run's log file by its PID."""
     for task in tasks.list_active():
@@ -286,7 +286,7 @@ def read_log(pid: int, lines: int = Query(default=30, ge=1, le=2000)) -> dict[st
     raise HTTPException(status_code=404, detail="Active task not found.")
 
 
-@app.get("/api/runs/log_by_path")
+@app.get("/api/runs/log_by_path", dependencies=[Depends(auth.require_admin)])
 def read_log_by_path(path: str, lines: int = Query(default=30, ge=1, le=2000)) -> dict[str, Any]:
     """Fallback log-reader for tasks whose entry has already been pruned."""
     requested = Path(path).resolve()
@@ -296,7 +296,7 @@ def read_log_by_path(path: str, lines: int = Query(default=30, ge=1, le=2000)) -
     return {"path": str(requested), "log": tasks.read_log_tail(str(requested), lines)}
 
 
-@app.get("/api/runs/recent")
+@app.get("/api/runs/recent", dependencies=[Depends(auth.require_admin)])
 def list_recent_runs(limit: int = Query(default=10, ge=1, le=200)) -> list[dict[str, Any]]:
     rows = db.list_runs(limit=limit)
     out: list[dict[str, Any]] = []
@@ -322,17 +322,17 @@ def list_recent_runs(limit: int = Query(default=10, ge=1, le=200)) -> list[dict[
 # ─── Tickers ──────────────────────────────────────────────────────────────
 
 
-@app.get("/api/tickers/top")
+@app.get("/api/tickers/top", dependencies=[Depends(auth.require_admin)])
 def tickers_top(n: int = Query(default=20, ge=1, le=500)) -> list[str]:
     return get_top_tickers(n)
 
 
-@app.get("/api/tickers/sp100")
+@app.get("/api/tickers/sp100", dependencies=[Depends(auth.require_admin)])
 def tickers_sp100() -> list[str]:
     return get_sp100_tickers()
 
 
-@app.get("/api/tickers/sp500")
+@app.get("/api/tickers/sp500", dependencies=[Depends(auth.require_admin)])
 def tickers_full() -> list[str]:
     return get_sp500_tickers()
 
@@ -367,12 +367,12 @@ def _schedule_payload() -> dict[str, Any]:
     }
 
 
-@app.get("/api/schedule")
+@app.get("/api/schedule", dependencies=[Depends(auth.require_admin)])
 def get_schedule() -> dict[str, Any]:
     return _schedule_payload()
 
 
-@app.put("/api/schedule")
+@app.put("/api/schedule", dependencies=[Depends(auth.require_admin)])
 def put_schedule(body: ScheduleUpdate) -> dict[str, Any]:
     cleaned_tickers = [t.strip().upper() for t in body.tickers if t.strip()]
     current = schedule_store.load_schedule()
