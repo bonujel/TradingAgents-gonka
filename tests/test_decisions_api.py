@@ -31,6 +31,19 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(api_mod.app)
 
 
+@pytest.fixture
+def api_client_no_auth_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """TestClient with REAL auth — used to prove an endpoint is public."""
+    db_path = tmp_path / "decisions.sqlite3"
+    monkeypatch.setenv("TRADINGAGENTS_APP_DB", str(db_path))
+
+    from app import api as api_mod
+    from app import db
+
+    db.init_db(db_path)
+    return TestClient(api_mod.app)
+
+
 def _seed(**kwargs) -> None:
     """Insert one decision row via the public upsert helper.
 
@@ -172,3 +185,23 @@ def test_get_decision_returns_full_row(api_client):
 def test_get_decision_returns_404_when_missing(api_client):
     resp = api_client.get("/api/decisions/NOPE/1999-01-01")
     assert resp.status_code == 404
+
+
+def test_get_decision_is_public_no_token_needed(api_client_no_auth_override):
+    """The detail endpoint must be reachable without a bearer token so the
+    public dashboard's ticker cards can deep-link straight into the report.
+    The list / models / dates endpoints stay token-gated — only the
+    /api/decisions/{ticker}/{trade_date} shape is opened up."""
+    _seed(ticker="AAPL", trade_date="2026-05-26", rating="Buy")
+    resp = api_client_no_auth_override.get("/api/decisions/AAPL/2026-05-26")
+    assert resp.status_code == 200
+    assert resp.json()["ticker"] == "AAPL"
+
+
+def test_list_decisions_still_requires_token(api_client_no_auth_override):
+    """Guard against accidentally opening the list endpoint too — only the
+    specific detail shape is public, the dashboard-feeding list is not."""
+    resp = api_client_no_auth_override.get(
+        "/api/decisions", params={"date": "2026-05-26"}
+    )
+    assert resp.status_code == 401

@@ -26,6 +26,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import string
@@ -59,7 +60,19 @@ _PUBLIC_PATHS = frozenset({
     "/api/auth/login",
     "/api/dashboard/stats",
     "/api/dashboard/top",
+    # Ticker → company name map. Wikipedia-derived public data; loaded by
+    # DecisionCard / DecisionSummaryCard which now render on public pages.
+    "/api/tickers/names",
 })
+
+# Parameterised public routes. The decision-detail endpoint
+# (/api/decisions/{ticker}/{trade_date}) is reachable from the public
+# dashboard's ticker cards, so the full report is also public — the
+# decision list, models, and dates endpoints stay token-gated because
+# they back the operator-only browsing UI.
+_PUBLIC_PATH_PATTERNS = (
+    re.compile(r"^/api/decisions/[^/]+/[^/]+$"),
+)
 
 # Unambiguous alphabet for generated passwords — no 0/O, 1/l/I.
 _PW_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
@@ -364,6 +377,8 @@ def require_authenticated(request: Request) -> Optional[dict[str, Any]]:
     """
     path = request.url.path
     if not path.startswith("/api/") or path in _PUBLIC_PATHS:
+        return None
+    if any(p.match(path) for p in _PUBLIC_PATH_PATTERNS):
         return None
     payload = verify_token(_bearer_token(request))
     if not payload:

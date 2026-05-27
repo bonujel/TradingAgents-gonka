@@ -147,7 +147,7 @@ const initials = computed(() => {
 
 async function logout() {
   auth.clear();
-  await navigateTo("/login");
+  await navigateTo("/dashboard");
 }
 
 const dashboardIcon = () =>

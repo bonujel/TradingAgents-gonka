@@ -1,6 +1,6 @@
 <template>
   <NuxtLink
-    v-if="isClickable && auth.isAuthenticated"
+    v-if="isClickable"
     :to="linkTarget"
     :class="cardClass"
   >
@@ -16,23 +16,16 @@
       <div class="font-mono">{{ card.trade_date }}</div>
     </div>
   </NuxtLink>
-  <div v-else :class="cardClass" @click="handleClick">
+  <div v-else :class="cardClass">
     <div class="flex items-baseline justify-between gap-2">
       <span class="font-mono text-lg font-bold tracking-tight text-white">{{ card.ticker }}</span>
       <span class="font-mono text-[10px] text-gonka-muted">#{{ card.market_cap_rank }}</span>
     </div>
     <div class="mt-2">
-      <div v-if="card.no_decision" class="font-mono text-xs text-gonka-muted">─ ─ ─</div>
-      <RatingBadge v-else :rating="card.rating ?? null" class="rating-glow" :data-rating="card.rating ?? ''" />
+      <div class="font-mono text-xs text-gonka-muted">─ ─ ─</div>
     </div>
     <div class="mt-3 space-y-0.5 text-[10px] text-gonka-muted">
-      <template v-if="card.no_decision">
-        <div>no analysis yet</div>
-      </template>
-      <template v-else>
-        <div class="truncate font-mono">{{ shortModel }}</div>
-        <div class="font-mono">{{ card.trade_date }}</div>
-      </template>
+      <div>no analysis yet</div>
     </div>
   </div>
 </template>
@@ -41,8 +34,6 @@
 import type { DashboardCard } from "~/composables/useApi";
 
 const props = defineProps<{ card: DashboardCard }>();
-const auth = useAuthStore();
-const loginModal = useLoginModalStore();
 
 const isClickable = computed(() => !props.card.no_decision);
 
@@ -63,13 +54,6 @@ const shortModel = computed(() => {
   const tail = m.split("/").pop() || m;
   return tail.length > 14 ? tail.slice(0, 14) + "…" : tail;
 });
-
-function handleClick(e: Event) {
-  if (!isClickable.value) return;
-  // Anonymous + clickable: prevent any default and pop the login modal.
-  e.preventDefault();
-  loginModal.show(linkTarget.value);
-}
 </script>
 
 <style scoped>
