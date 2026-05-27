@@ -42,16 +42,19 @@ FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 # ─── Helpers ────────────────────────────────────────────────────────────────
 log() { printf '\033[0;36m[start.sh]\033[0m %s\n' "$*"; }
 
-# Kill ``pid`` only when it is still alive AND its /proc/<pid>/cmdline
-# contains ``sentinel``. The sentinel guards against PID reuse: between our
-# launch and our stop the kernel may have recycled the pid into an
-# unrelated process — without the cmdline check we would happily ``kill``
-# that bystander.
+# Kill ``pid`` only when it is still alive AND its argv contains
+# ``sentinel``. The sentinel guards against PID reuse: between our launch
+# and our stop the kernel may have recycled the pid into an unrelated
+# process — without the cmdline check we would happily ``kill`` that
+# bystander.
+#
+# Uses ``ps -p`` (POSIX) instead of ``/proc/<pid>/cmdline`` so the check
+# works on macOS too (Darwin has no /proc filesystem).
 kill_if_owns() {
   local pid="$1" sentinel="$2"
   [ -n "$pid" ] || return 0
-  [ -e "/proc/$pid" ] || return 0
-  if grep -q -- "$sentinel" "/proc/$pid/cmdline" 2>/dev/null; then
+  kill -0 "$pid" 2>/dev/null || return 0
+  if ps -p "$pid" -o args= 2>/dev/null | grep -q -- "$sentinel"; then
     kill "$pid" 2>/dev/null || true
   fi
 }
@@ -70,17 +73,23 @@ stop_all() {
   fi
 
   # app.runner subprocesses are spawned detached by the backend, so we
-  # don't own their PIDs at restart time. Scope by /proc/<pid>/cwd: only
-  # kill app.runner processes whose working directory IS this clone, so a
-  # second clone of TradingAgents on the same box keeps running.
+  # don't own their PIDs at restart time. Scope to this clone only — a
+  # second TradingAgents clone on the same box must keep running.
+  #
+  # Linux: read /proc/<pid>/cwd (always accurate).
+  # macOS: fall back to ``lsof -a -d cwd -p <pid>`` which prints the cwd
+  # in column 9 of the LAST line (the cwd entry). lsof is in /usr/sbin on
+  # macOS by default. If neither works we err on the side of NOT killing.
   if pgrep -f "app\.runner" >/dev/null 2>&1; then
     for pid in $(pgrep -f "app\.runner" 2>/dev/null); do
+      local cwd=""
       if [ -e "/proc/$pid/cwd" ]; then
-        local cwd
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
-        if [ "$cwd" = "$REPO_DIR" ]; then
-          kill "$pid" 2>/dev/null || true
-        fi
+      elif command -v lsof >/dev/null 2>&1; then
+        cwd=$(lsof -a -d cwd -p "$pid" 2>/dev/null | awk 'NR>1 {print $NF}' | tail -1)
+      fi
+      if [ -n "$cwd" ] && [ "$cwd" = "$REPO_DIR" ]; then
+        kill "$pid" 2>/dev/null || true
       fi
     done
   fi
