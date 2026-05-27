@@ -1,26 +1,20 @@
 /**
  * Global route guard.
  *
- * - Unauthenticated users are bounced to /login (except when already there).
- * - Authenticated users hitting /login are sent to the dashboard.
- * - Tasks / Schedule / Settings / Account Management are super-admin
- *   only — normal users can only browse Decisions and tweak their own
- *   Personal Settings (password). Backend enforces the same fence via
- *   ``Depends(auth.require_admin)`` so this guard isn't the security
- *   boundary, just the UX one.
- * - /profile is normal-user-only (the super admin's password rotates on
- *   restart, so it has nothing to reset).
+ * - /dashboard is public (no token needed)
+ * - / for anonymous users → /dashboard (so the bare domain works for guests)
+ * - any private path for anonymous users → /dashboard?login=1&return_to=...
+ *   (dashboard page reads ?login=1 and opens the in-place login modal,
+ *   then on success navigates to return_to)
+ * - /login behaves as before (authenticated users bounced to /)
+ * - admin/profile gating preserved for logged-in users
  */
 
-// Paths that require the admin role. ``startsWith`` matches the page itself
-// plus any nested route (e.g. /tasks/foo) so we don't have to enumerate.
+const PUBLIC_PATHS = ["/dashboard"];
+const REDIRECT_ROOT = ["/"];
 const ADMIN_ONLY_PATHS = ["/tasks", "/schedule", "/settings", "/account"];
 
 export default defineNuxtRouteMiddleware((to) => {
-  // The session token lives in localStorage, which only exists in the
-  // browser. Skip on the server — the client guard re-runs on hydration
-  // and performs the real redirect. Protected pages fetch their data in
-  // onMounted (client-only), so nothing sensitive loads server-side.
   if (import.meta.server) return;
 
   const auth = useAuthStore();
@@ -31,8 +25,14 @@ export default defineNuxtRouteMiddleware((to) => {
     return;
   }
 
+  if (PUBLIC_PATHS.includes(to.path)) return;
+
   if (!auth.isAuthenticated) {
-    return navigateTo("/login");
+    if (REDIRECT_ROOT.includes(to.path)) return navigateTo("/dashboard");
+    return navigateTo({
+      path: "/dashboard",
+      query: { login: "1", return_to: to.fullPath },
+    });
   }
 
   if (

@@ -18,24 +18,43 @@
     </div>
 
     <nav class="flex-1 space-y-1 px-3 py-4 text-sm">
-      <NuxtLink
-        v-for="item in navItems"
-        :key="item.to"
-        :to="item.to"
-        class="group flex items-center gap-3 rounded-lg px-3 py-2 text-gonka-muted transition hover:bg-gonka-card hover:text-gonka-text"
-        active-class="bg-gonka-card text-gonka-text shadow-card"
-      >
-        <span
-          class="grid h-7 w-7 place-items-center rounded-md border border-gonka-border bg-gonka-card text-gonka-muted group-hover:text-emerald-400"
+      <template v-for="item in navItems" :key="item.to">
+        <NuxtLink
+          v-if="!item.locked"
+          :to="item.to"
+          class="group flex items-center gap-3 rounded-lg px-3 py-2 text-gonka-muted transition hover:bg-gonka-card hover:text-gonka-text"
+          active-class="bg-gonka-card text-gonka-text shadow-card"
         >
-          <component :is="item.icon" class="h-4 w-4" />
-        </span>
-        <span class="flex-1">{{ item.label }}</span>
-        <span v-if="item.badge" class="chip text-[10px]">{{ item.badge }}</span>
-      </NuxtLink>
+          <span
+            class="grid h-7 w-7 place-items-center rounded-md border border-gonka-border bg-gonka-card text-gonka-muted group-hover:text-emerald-400"
+          >
+            <component :is="item.icon" class="h-4 w-4" />
+          </span>
+          <span class="flex-1">{{ item.label }}</span>
+          <span v-if="item.badge" class="chip text-[10px]">{{ item.badge }}</span>
+        </NuxtLink>
+        <button
+          v-else
+          type="button"
+          class="group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-gonka-muted/60 opacity-60 transition hover:opacity-90"
+          @click="loginModal.show(item.to)"
+        >
+          <span
+            class="grid h-7 w-7 place-items-center rounded-md border border-gonka-border bg-gonka-card text-gonka-muted/60"
+          >
+            <component :is="item.icon" class="h-4 w-4" />
+          </span>
+          <span class="flex-1">{{ item.label }}</span>
+          <span class="text-[10px]">🔒</span>
+        </button>
+      </template>
     </nav>
 
-    <div class="m-3 rounded-lg border border-gonka-border bg-gonka-card p-3 text-xs text-gonka-muted">
+    <!-- Connection panel (logged-in only) -->
+    <div
+      v-if="auth.isAuthenticated"
+      class="m-3 rounded-lg border border-gonka-border bg-gonka-card p-3 text-xs text-gonka-muted"
+    >
       <div class="mb-1 flex items-center justify-between">
         <span class="font-semibold text-gonka-text">Connection</span>
         <span
@@ -53,8 +72,9 @@
       </div>
     </div>
 
+    <!-- Bottom: user pill (logged in) OR Log-in CTA (anonymous) -->
     <div class="border-t border-gonka-border p-3">
-      <div class="flex items-center gap-2 px-1">
+      <div v-if="auth.isAuthenticated" class="flex items-center gap-2 px-1">
         <span
           class="grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold uppercase"
           :class="
@@ -85,15 +105,32 @@
           </svg>
         </button>
       </div>
+      <button
+        v-else
+        class="btn btn-primary w-full"
+        type="button"
+        @click="loginModal.show(null)"
+      >
+        Log in
+      </button>
     </div>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { h } from "vue";
+import { h, type Component } from "vue";
+
+interface NavItem {
+  to: string;
+  label: string;
+  icon: Component;
+  locked: boolean;
+  badge?: string;
+}
 
 const infoStore = useInfoStore();
 const auth = useAuthStore();
+const loginModal = useLoginModalStore();
 const info = computed(() => infoStore.info);
 
 const shortModel = computed(() => {
@@ -113,6 +150,19 @@ async function logout() {
   await navigateTo("/login");
 }
 
+const dashboardIcon = () =>
+  h(
+    "svg",
+    { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8 },
+    [
+      h("path", {
+        d: "M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 9h8V3h-8z",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+    ],
+  );
+
 const accountIcon = () =>
   h(
     "svg",
@@ -125,7 +175,7 @@ const accountIcon = () =>
         "stroke-linejoin": "round",
       }),
       h("path", { d: "M17 8h4M19 6v4", "stroke-linecap": "round" }),
-    ]
+    ],
   );
 
 const profileIcon = () =>
@@ -139,10 +189,17 @@ const profileIcon = () =>
         "stroke-linecap": "round",
         "stroke-linejoin": "round",
       }),
-    ]
+    ],
   );
 
-const decisionsItem = {
+const dashboardItem: NavItem = {
+  to: "/dashboard",
+  label: "Dashboard",
+  icon: dashboardIcon,
+  locked: false,
+};
+
+const decisionsItem: NavItem = {
   to: "/",
   label: "Decisions",
   icon: () =>
@@ -150,23 +207,14 @@ const decisionsItem = {
       "svg",
       { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8 },
       [
-        h("path", {
-          d: "M3 3v18h18",
-          "stroke-linecap": "round",
-          "stroke-linejoin": "round",
-        }),
-        h("path", {
-          d: "M7 14l3-3 3 3 5-6",
-          "stroke-linecap": "round",
-          "stroke-linejoin": "round",
-        }),
-      ]
+        h("path", { d: "M3 3v18h18", "stroke-linecap": "round", "stroke-linejoin": "round" }),
+        h("path", { d: "M7 14l3-3 3 3 5-6", "stroke-linecap": "round", "stroke-linejoin": "round" }),
+      ],
     ),
+  locked: false,
 };
 
-// Tasks / Schedule / Settings are super-admin only — normal users get
-// the read-only Decisions view plus their Personal Settings.
-const adminOnlyItems = [
+const adminOnlyItems: NavItem[] = [
   {
     to: "/tasks",
     label: "Tasks",
@@ -182,8 +230,9 @@ const adminOnlyItems = [
             "stroke-linejoin": "round",
             fill: "currentColor",
           }),
-        ]
+        ],
       ),
+    locked: false,
   },
   {
     to: "/schedule",
@@ -195,8 +244,9 @@ const adminOnlyItems = [
         [
           h("circle", { cx: "12", cy: "12", r: "9" }),
           h("path", { d: "M12 7v5l3 2", "stroke-linecap": "round", "stroke-linejoin": "round" }),
-        ]
+        ],
       ),
+    locked: false,
   },
   {
     to: "/settings",
@@ -212,26 +262,32 @@ const adminOnlyItems = [
             "stroke-linecap": "round",
             "stroke-linejoin": "round",
           }),
-        ]
+        ],
       ),
+    locked: false,
   },
 ];
 
-// Normal users only see Decisions + Personal Settings. Super admin sees
-// the full operator console (Tasks / Schedule / Settings + Account
-// Management). Personal Settings is hidden for the super admin because
-// its password rotates on restart and there is nothing to change.
-const navItems = computed(() => {
-  if (auth.isAdmin) {
+const accountItem: NavItem = { to: "/account", label: "Account Management", icon: accountIcon, locked: false };
+
+const navItems = computed<NavItem[]>(() => {
+  if (!auth.isAuthenticated) {
+    // Anonymous: Dashboard is the only unlocked tab. Everything else is
+    // visually present but click-triggers the login modal.
     return [
-      decisionsItem,
-      ...adminOnlyItems,
-      { to: "/account", label: "Account Management", icon: accountIcon },
+      dashboardItem,
+      { ...decisionsItem, locked: true },
+      ...adminOnlyItems.map((i) => ({ ...i, locked: true })),
+      { ...accountItem, locked: true },
     ];
   }
+  if (auth.isAdmin) {
+    return [dashboardItem, decisionsItem, ...adminOnlyItems, accountItem];
+  }
   return [
+    dashboardItem,
     decisionsItem,
-    { to: "/profile", label: "Personal Settings", icon: profileIcon },
+    { to: "/profile", label: "Personal Settings", icon: profileIcon, locked: false } as NavItem,
   ];
 });
 </script>

@@ -21,28 +21,30 @@
     </div>
 
     <div class="hidden items-center gap-2 md:flex">
-      <div
-        class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
-      >
-        <span class="font-mono text-gonka-muted">mode</span>
-        <span class="font-semibold uppercase">{{ info?.mode || "?" }}</span>
-        <span
-          class="ml-1 h-2 w-2 rounded-full"
-          :class="info?.configured ? 'bg-emerald-500' : 'bg-amber-500'"
-        ></span>
-      </div>
-      <div
-        class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
-      >
-        <span class="font-mono text-gonka-muted">model</span>
-        <span class="font-mono">{{ shortModel }}</span>
-      </div>
-      <div
-        class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
-      >
-        <span class="font-mono text-gonka-muted">workers</span>
-        <span class="font-mono">{{ info?.max_workers ?? "?" }}</span>
-      </div>
+      <template v-if="info">
+        <div
+          class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
+        >
+          <span class="font-mono text-gonka-muted">mode</span>
+          <span class="font-semibold uppercase">{{ info.mode || "?" }}</span>
+          <span
+            class="ml-1 h-2 w-2 rounded-full"
+            :class="info.configured ? 'bg-emerald-500' : 'bg-amber-500'"
+          ></span>
+        </div>
+        <div
+          class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
+        >
+          <span class="font-mono text-gonka-muted">model</span>
+          <span class="font-mono">{{ shortModel }}</span>
+        </div>
+        <div
+          class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
+        >
+          <span class="font-mono text-gonka-muted">workers</span>
+          <span class="font-mono">{{ info.max_workers ?? "?" }}</span>
+        </div>
+      </template>
     </div>
   </header>
 </template>
@@ -56,6 +58,7 @@ const info = computed(() => infoStore.info);
 
 const pageTitle = computed(() => {
   if (route.path === "/") return "Decisions";
+  if (route.path === "/dashboard") return "Dashboard";
   if (route.path.startsWith("/tasks")) return "Tasks";
   if (route.path.startsWith("/settings")) return "Settings";
   return "Dashboard";
@@ -63,6 +66,7 @@ const pageTitle = computed(() => {
 
 const subtitle = computed(() => {
   if (route.path === "/") return "Latest agent verdicts";
+  if (route.path === "/dashboard") return "Public view";
   if (route.path.startsWith("/tasks")) return "Runs & schedules";
   if (route.path.startsWith("/settings")) return "Gonka connection";
   return "";

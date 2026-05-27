@@ -40,6 +40,22 @@ export interface DecisionRow {
   created_at: string;
 }
 
+export interface DashboardStats {
+  dates_analyzed: number;
+  tickers_analyzed: number;
+}
+
+export interface DashboardCard {
+  ticker: string;
+  market_cap_rank: number;
+  rating?: string | null;
+  deep_model?: string | null;
+  trade_date?: string;
+  created_at?: string;
+  has_error?: boolean;
+  no_decision?: boolean;
+}
+
 export interface ActiveTask {
   pid: number;
   kind: "manual" | "scheduled";
@@ -180,14 +196,25 @@ export function useApi() {
       return await $fetch<T>(buildUrl(base, path), { ...opts, headers });
     } catch (err: unknown) {
       // A 401 means the token is missing/expired — drop the session and
-      // send the operator back to the login screen. Skip the redirect for
-      // the login call itself so a bad password shows inline instead.
+      // send the visitor to the public dashboard with the login modal
+      // ready (preserving the original location as return_to). Skip the
+      // redirect for the login call itself so a bad password shows
+      // inline in the modal instead. /dashboard and /login themselves
+      // are already at safe destinations, so leave them alone.
       const e = err as { response?: { status?: number }; statusCode?: number };
       const status = e?.response?.status ?? e?.statusCode;
+      const PUBLIC_PAGE_PATHS = new Set(["/login", "/dashboard"]);
       if (status === 401 && path !== "/api/auth/login") {
         auth.clear();
-        if (typeof window !== "undefined" && window.location.pathname !== "/login") {
-          navigateTo("/login");
+        if (
+          typeof window !== "undefined" &&
+          !PUBLIC_PAGE_PATHS.has(window.location.pathname)
+        ) {
+          const here = window.location.pathname + window.location.search;
+          navigateTo({
+            path: "/dashboard",
+            query: { login: "1", return_to: here },
+          });
         }
       }
       throw err;
@@ -236,6 +263,8 @@ export function useApi() {
       request<string[]>("/api/decisions/models", { params: { date } }),
     getDecision: (ticker: string, tradeDate: string) =>
       request<DecisionRow>(`/api/decisions/${encodeURIComponent(ticker)}/${tradeDate}`),
+    getDashboardStats: () => request<DashboardStats>("/api/dashboard/stats"),
+    getDashboardTop: () => request<DashboardCard[]>("/api/dashboard/top"),
     listActiveRuns: () => request<ActiveTask[]>("/api/runs/active"),
     listRecentRuns: (limit = 10) =>
       request<RunRecord[]>("/api/runs/recent", { params: { limit } }),

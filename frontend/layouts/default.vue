@@ -35,9 +35,14 @@
 
 <script setup lang="ts">
 const infoStore = useInfoStore();
+const auth = useAuthStore();
 
 onMounted(() => {
-  if (!infoStore.loaded) {
+  // /api/info requires a token; calling it as an anonymous visitor would
+  // 401 and trigger the redirect-to-login fallback. Anonymous visitors on
+  // /dashboard don't need this data anyway — the sidebar/topbar widgets
+  // that consume infoStore hide their info-dependent chrome below.
+  if (auth.isAuthenticated && !infoStore.loaded) {
     infoStore.refresh();
   }
 });
