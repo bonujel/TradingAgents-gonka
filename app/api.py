@@ -183,6 +183,48 @@ def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     return public_view(next_settings)
 
 
+# ─── Dashboard (public) ───────────────────────────────────────────────────
+
+
+@app.get("/api/dashboard/stats")
+def dashboard_stats() -> dict[str, int]:
+    return {
+        "dates_analyzed": db.count_distinct_dates(),
+        "tickers_analyzed": db.count_distinct_tickers(),
+    }
+
+
+@app.get("/api/dashboard/top")
+def dashboard_top() -> list[dict[str, Any]]:
+    try:
+        tickers = get_top_tickers(n=20)
+    except Exception as exc:
+        # get_top_tickers hits Wikipedia. Surface a 503 so the frontend
+        # can degrade. Stats endpoint is unaffected.
+        raise HTTPException(status_code=503, detail=f"top tickers unavailable: {exc}") from exc
+    latest = db.get_latest_decision_per_ticker(tickers=tickers)
+    return [
+        _to_dashboard_card(t, rank, latest.get(t.upper()))
+        for rank, t in enumerate(tickers, start=1)
+    ]
+
+
+def _to_dashboard_card(
+    ticker: str, rank: int, row
+) -> dict[str, Any]:
+    if row is None:
+        return {"ticker": ticker, "market_cap_rank": rank, "no_decision": True}
+    return {
+        "ticker": ticker,
+        "market_cap_rank": rank,
+        "rating": row["rating"],
+        "deep_model": row["deep_model"],
+        "trade_date": row["trade_date"],
+        "created_at": row["created_at"],
+        "has_error": bool(row["has_error"]),
+    }
+
+
 # ─── Decisions ────────────────────────────────────────────────────────────
 
 

@@ -234,6 +234,56 @@ def list_run_dates(*, path: Optional[Path] = None) -> list[str]:
         return [r["trade_date"] for r in rows]
 
 
+def count_distinct_dates(*, path: Optional[Path] = None) -> int:
+    """Total number of distinct trade_dates with at least one decision."""
+    with connect(path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT trade_date) AS n FROM decisions"
+        ).fetchone()
+        return int(row["n"])
+
+
+def count_distinct_tickers(*, path: Optional[Path] = None) -> int:
+    """Total number of distinct tickers ever analyzed."""
+    with connect(path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT ticker) AS n FROM decisions"
+        ).fetchone()
+        return int(row["n"])
+
+
+def get_latest_decision_per_ticker(
+    *, tickers: list[str], path: Optional[Path] = None
+) -> dict[str, sqlite3.Row]:
+    """For each ticker, return its most recent decision (summary columns only).
+
+    Tickers without any stored decision are simply absent from the returned
+    dict; the caller fills the gap with a placeholder. One SQL round-trip;
+    avoids N+1 by joining each ticker to its MAX(trade_date) in a subquery.
+    """
+    if not tickers:
+        return {}
+    upper = [t.upper() for t in tickers]
+    placeholders = ",".join("?" * len(upper))
+    with connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, ticker, trade_date, rating, deep_model, created_at,
+                   (error IS NOT NULL) AS has_error
+              FROM decisions
+             WHERE ticker IN ({placeholders})
+               AND (ticker, trade_date) IN (
+                   SELECT ticker, MAX(trade_date)
+                     FROM decisions
+                    WHERE ticker IN ({placeholders})
+                    GROUP BY ticker
+               )
+            """,
+            [*upper, *upper],
+        ).fetchall()
+    return {r["ticker"]: r for r in rows}
+
+
 def list_distinct_models(
     *, trade_date: str, path: Optional[Path] = None
 ) -> list[str]:

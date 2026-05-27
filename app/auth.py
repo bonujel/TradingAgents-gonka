@@ -54,7 +54,12 @@ _PBKDF2_ROUNDS = 200_000
 
 # Endpoints reachable without a token. Everything else under /api/ requires
 # a valid bearer token (see ``require_authenticated``).
-_PUBLIC_PATHS = frozenset({"/api/health", "/api/auth/login"})
+_PUBLIC_PATHS = frozenset({
+    "/api/health",
+    "/api/auth/login",
+    "/api/dashboard/stats",
+    "/api/dashboard/top",
+})
 
 # Unambiguous alphabet for generated passwords — no 0/O, 1/l/I.
 _PW_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
