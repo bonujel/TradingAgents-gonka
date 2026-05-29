@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .settings_store import APP_HOME
@@ -21,7 +20,8 @@ _LOCK = threading.RLock()
 
 
 def _now_iso() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    """Tz-aware UTC ISO ('...+00:00'). Frontend converts to user-local."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _defaults() -> dict[str, Any]:
@@ -114,11 +114,15 @@ def mark_start_error(message: str) -> dict[str, Any]:
 
 
 def server_time_info() -> dict[str, Any]:
-    """Return the FastAPI host's local clock + tz info for the UI."""
-    now = datetime.now().astimezone()
-    offset = now.utcoffset()
+    """Return the FastAPI host's UTC clock for the UI.
+
+    Frontend treats all stored timestamps as UTC and converts them to the
+    operator's tz client-side. Server tz is intentionally not exposed —
+    the system has one canonical clock (UTC) and the UI is per-operator.
+    """
+    now = datetime.now(timezone.utc)
     return {
         "now": now.isoformat(timespec="seconds"),
-        "tz_name": now.tzname() or time.tzname[0] or "local",
-        "tz_offset_seconds": int(offset.total_seconds()) if offset else 0,
+        "tz_name": "UTC",
+        "tz_offset_seconds": 0,
     }

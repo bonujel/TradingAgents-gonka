@@ -13,7 +13,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -121,7 +121,9 @@ def upsert_decision(
     we drop them — the JSON state log on disk is still the source of truth for
     full traces.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    # Timezone-aware UTC ISO ("...+00:00"). Frontend identifies "this is
+    # UTC" from the offset suffix and converts to the user's local tz.
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect(path) as conn:
         conn.execute(
             """
@@ -167,7 +169,7 @@ def upsert_decision(
 
 
 def start_run(*, run_date: str, tickers: Iterable[str], path: Optional[Path] = None) -> int:
-    started = datetime.utcnow().isoformat(timespec="seconds")
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect(path) as conn:
         cur = conn.execute(
             "INSERT INTO run_log(run_date, started_at, tickers) VALUES (?, ?, ?)",
@@ -184,7 +186,7 @@ def finish_run(
     notes: Optional[str] = None,
     path: Optional[Path] = None,
 ) -> None:
-    finished = datetime.utcnow().isoformat(timespec="seconds")
+    finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect(path) as conn:
         conn.execute(
             """

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -38,7 +38,10 @@ def _get_scheduler() -> BackgroundScheduler:
     global _SCHED
     with _LOCK:
         if _SCHED is None:
-            _SCHED = BackgroundScheduler()
+            # Anchor the scheduler in UTC. start_hour / start_minute in
+            # schedule.json are UTC integers; the frontend converts
+            # between the operator's tz and UTC at the form layer.
+            _SCHED = BackgroundScheduler(timezone=timezone.utc)
             _SCHED.start()
             _SCHED.add_job(
                 _maybe_start_catch_up,
@@ -147,12 +150,14 @@ def reload_schedule() -> dict[str, Any]:
     if not cfg.get("enabled"):
         return {"next_run": None}
 
-    # Compute the first fire as "today at HH:MM in local tz". If we've
-    # already passed that time, advance by ``interval_hours`` until the
-    # next slot is in the future. APScheduler then takes over with the
-    # interval trigger; using ``start_date`` (vs CronTrigger) keeps the
-    # spacing exact even when interval_hours doesn't divide 24.
-    now = datetime.now().astimezone()
+    # Compute the first fire as "today at HH:MM UTC". start_hour /
+    # start_minute are UTC integers (the frontend submits in UTC after
+    # converting from the operator's local tz). If we've already passed
+    # that time, advance by ``interval_hours`` until the next slot is in
+    # the future. APScheduler then takes over with the interval trigger;
+    # using ``start_date`` (vs CronTrigger) keeps the spacing exact even
+    # when interval_hours doesn't divide 24.
+    now = datetime.now(timezone.utc)
     first = now.replace(
         hour=int(cfg["start_hour"]),
         minute=int(cfg["start_minute"]),
@@ -163,7 +168,7 @@ def reload_schedule() -> dict[str, Any]:
     while first <= now:
         first += timedelta(hours=interval)
 
-    trigger = IntervalTrigger(hours=interval, start_date=first)
+    trigger = IntervalTrigger(hours=interval, start_date=first, timezone=timezone.utc)
     sched.add_job(
         _fire_scheduled_run,
         trigger=trigger,

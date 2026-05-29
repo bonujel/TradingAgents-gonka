@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -354,8 +354,18 @@ def list_recent_runs(limit: int = Query(default=10, ge=1, le=200)) -> list[dict[
             try:
                 t0 = datetime.fromisoformat(d["started_at"])
                 t1 = datetime.fromisoformat(d["finished_at"])
+                # Pre-2026-05-27 rows were naive UTC strings; post-fix
+                # rows carry ``+00:00``. Mixing a naive and aware datetime
+                # in subtraction raises TypeError, which the bare
+                # ValueError clause below would not catch — explicitly
+                # promote the naive side to aware UTC so the legacy /
+                # new transition window doesn't 500.
+                if t0.tzinfo is None:
+                    t0 = t0.replace(tzinfo=timezone.utc)
+                if t1.tzinfo is None:
+                    t1 = t1.replace(tzinfo=timezone.utc)
                 elapsed = int((t1 - t0).total_seconds())
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
         d["elapsed_seconds"] = elapsed
         try:

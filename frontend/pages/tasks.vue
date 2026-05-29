@@ -241,9 +241,9 @@ function parseTickers(raw: string): string[] {
   );
 }
 
+const { formatLocal } = useFormatTime();
 function shortTime(iso: string | null) {
-  if (!iso) return "";
-  return iso.replace("T", " ").slice(0, 19);
+  return formatLocal(iso);
 }
 
 async function loadTopTickers() {

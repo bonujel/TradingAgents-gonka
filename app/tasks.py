@@ -103,9 +103,24 @@ def _parse_etime(etime: str) -> "timedelta":
     return timedelta(0)
 
 
-def _utc_now_naive() -> datetime:
-    """Wrapper so tests can monkeypatch the clock."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def _utc_now() -> datetime:
+    """Tz-aware UTC ``datetime``. Wrapper so tests can monkeypatch the clock."""
+    return datetime.now(timezone.utc)
+
+
+def _parse_stored_dt(value: str) -> datetime:
+    """Parse a stored ISO timestamp, treating naive strings as UTC.
+
+    Legacy entries in ``active_tasks.json`` (pre-2026-05-27) were written
+    as naive UTC ISO with no offset suffix. New entries carry ``+00:00``.
+    Reading either back through this helper guarantees the returned
+    ``datetime`` is tz-aware so subsequent arithmetic doesn't blow up on
+    "can't subtract offset-naive and offset-aware datetimes".
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _run_ps_scan() -> Optional[str]:
@@ -143,7 +158,7 @@ def _scan_runner_processes() -> list[dict[str, Any]]:
     raw = _run_ps_scan()
     if not raw:
         return []
-    now = _utc_now_naive()
+    now = _utc_now()
     rows: list[dict[str, Any]] = []
     for line in raw.splitlines():
         line = line.strip()
@@ -241,16 +256,17 @@ def _check_recent_launch(active: list[dict[str, Any]], *, window_seconds: int) -
     """Raise ``RecentDuplicateLaunch`` if any active task started within window."""
     if window_seconds <= 0:
         return
-    now = _utc_now_naive()
+    now = _utc_now()
     for task in active:
-        started = datetime.fromisoformat(task["started_at"])
+        started = _parse_stored_dt(task["started_at"])
         gap = (now - started).total_seconds()
         if 0 <= gap < window_seconds:
             raise RecentDuplicateLaunch(gap, window_seconds)
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    """Tz-aware UTC ISO ('...+00:00'). Frontend converts to user-local."""
+    return _utc_now().isoformat(timespec="seconds")
 
 
 def _load_index() -> list[dict[str, Any]]:
@@ -376,7 +392,7 @@ def start_run(
         _check_recent_launch(active, window_seconds=_dedup_window_seconds())
 
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
-        started = datetime.now(timezone.utc).replace(tzinfo=None)
+        started = _utc_now()
         stamp = started.strftime("%Y%m%d_%H%M%S")
         log_path = _LOG_DIR / f"run_{stamp}_{os.getpid()}.log"
         cmd = [sys.executable, "-m", "app.runner", "-j", str(workers), *tickers]
@@ -433,6 +449,6 @@ def read_log_tail(path: Optional[str], n: int = 30) -> str:
 
 def task_with_runtime(task: dict[str, Any]) -> dict[str, Any]:
     """Enrich a stored task entry with elapsed seconds for the API surface."""
-    started_at = datetime.fromisoformat(task["started_at"])
-    elapsed = (datetime.utcnow() - started_at).total_seconds()
+    started_at = _parse_stored_dt(task["started_at"])
+    elapsed = (_utc_now() - started_at).total_seconds()
     return {**task, "elapsed_seconds": int(elapsed)}

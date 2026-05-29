@@ -18,7 +18,7 @@
         {{ shortModel }}
       </span>
       <span class="text-xs text-gonka-muted">
-        stored {{ shortTimestamp(row.created_at) }}
+        stored {{ formatLocal(row.created_at) }}
       </span>
     </header>
 
@@ -118,8 +118,5 @@ const shortModel = computed(() => {
   return tail.length > 28 ? tail.slice(0, 28) + "…" : tail;
 });
 
-function shortTimestamp(iso: string): string {
-  if (!iso) return "";
-  return iso.replace("T", " ").slice(0, 19);
-}
+const { formatLocal } = useFormatTime();
 </script>

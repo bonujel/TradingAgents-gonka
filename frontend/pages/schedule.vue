@@ -10,18 +10,19 @@
 
     <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <div class="card px-5 py-4">
-        <div class="label">Server time</div>
+        <div class="label">Now (your timezone)</div>
         <div class="mt-2 font-mono text-xl font-semibold text-white">
-          {{ formattedLocalTime }}
+          {{ formattedLocalNow }}
         </div>
         <p class="mt-1 text-xs text-gonka-muted">
-          {{ serverTimeZoneLine }}
+          Server stores everything in UTC; this card and the schedule
+          inputs below are in your browser timezone.
         </p>
       </div>
       <MetricCard
         label="Schedule status"
         :value="schedule?.config.enabled ? 'Enabled' : 'Disabled'"
-        :hint="schedule?.next_run ? `Next: ${formatIso(schedule.next_run)}` : 'Toggle below to enable'"
+        :hint="schedule?.next_run ? `Next: ${formatLocal(schedule.next_run)}` : 'Toggle below to enable'"
       >
         <template #trailing>
           <span
@@ -73,15 +74,15 @@
         </div>
         <div>
           <span class="label">Last missed</span>
-          <div class="mt-1 font-mono text-white">{{ formatMaybeIso(schedule?.config.last_missed_at) }}</div>
+          <div class="mt-1 font-mono text-white">{{ formatMaybeLocal(schedule?.config.last_missed_at) }}</div>
         </div>
         <div>
           <span class="label">Last catch-up</span>
-          <div class="mt-1 font-mono text-white">{{ formatMaybeIso(schedule?.config.last_catch_up_at) }}</div>
+          <div class="mt-1 font-mono text-white">{{ formatMaybeLocal(schedule?.config.last_catch_up_at) }}</div>
         </div>
         <div>
           <span class="label">Last regular fire</span>
-          <div class="mt-1 font-mono text-white">{{ formatMaybeIso(schedule?.config.last_regular_fire_at) }}</div>
+          <div class="mt-1 font-mono text-white">{{ formatMaybeLocal(schedule?.config.last_regular_fire_at) }}</div>
         </div>
       </div>
       <p v-if="schedule?.config.last_start_error" class="text-xs text-red-200">
@@ -144,15 +145,15 @@
       </div>
 
       <p class="text-xs text-gonka-muted">
+        Enter the hour/minute in <span class="font-mono">your browser timezone</span>.
         First fire is today at
         <span class="font-mono text-emerald-300">
           {{ pad(draft.start_hour) }}:{{ pad(draft.start_minute) }}
         </span>
-        in
-        <span class="font-mono">{{ schedule?.server_time.tz_name || "local" }}</span>;
-        if that's already passed, the scheduler advances by the interval until the
-        next slot is in the future. Times are interpreted in the host's timezone
-        (shown above).
+        local
+        (<span class="font-mono">{{ pad(utcStartHour) }}:{{ pad(utcStartMinute) }}</span> UTC,
+        the canonical form the server stores). If that local moment is already past today, the
+        scheduler advances by the interval until the next slot is in the future.
       </p>
 
       <div>
@@ -265,30 +266,14 @@ let polling: ReturnType<typeof setInterval> | null = null;
 
 const tickerCount = computed(() => parseTickers(tickersInput.value).length);
 
-const formattedLocalTime = computed(() => {
-  if (!schedule.value) return "—";
-  // Re-anchor on the server's last-reported epoch plus the wall-clock
-  // milliseconds that have elapsed since we received it. Then shift by
-  // the server's UTC offset so ``toISOString`` (which always emits UTC)
-  // ends up rendering the *server's* local wall-clock string. Otherwise
-  // the card would silently show UTC even though the label says CST.
-  const elapsedMs = localNow.value.getTime() - lastSync.value;
-  const offsetSec = schedule.value.server_time.tz_offset_seconds || 0;
-  const shifted = new Date(serverEpochMs.value + elapsedMs + offsetSec * 1000);
-  return shifted.toISOString().replace("T", " ").slice(0, 19);
-});
+// Operator-local wall clock. Backend (now in UTC) is no longer the
+// source — every operator just reads their own browser clock. Re-renders
+// every second via the ``ticker`` interval set in onMounted().
+const formattedLocalNow = computed(() =>
+  localNow.value.toLocaleString("sv-SE", { hour12: false })
+);
 
-const serverTimeZoneLine = computed(() => {
-  const s = schedule.value;
-  if (!s) return "";
-  const offsetSec = s.server_time.tz_offset_seconds || 0;
-  const hours = Math.abs(offsetSec) / 3600;
-  const sign = offsetSec >= 0 ? "+" : "-";
-  return `${s.server_time.tz_name} (UTC${sign}${hours})`;
-});
-
-const lastSync = ref(0);
-const serverEpochMs = ref(0);
+const { formatLocal } = useFormatTime();
 
 function pad(n: number): string {
   return String(Math.max(0, n)).padStart(2, "0");
@@ -305,13 +290,35 @@ function parseTickers(raw: string): string[] {
   );
 }
 
-function formatIso(iso: string): string {
-  return iso.replace("T", " ").slice(0, 19);
+function formatMaybeLocal(iso?: string | null): string {
+  return iso ? formatLocal(iso) : "—";
 }
 
-function formatMaybeIso(iso?: string | null): string {
-  return iso ? formatIso(iso) : "—";
+// Convert local (browser-tz) HH:MM into the canonical UTC HH:MM that the
+// backend stores. Uses today as the date anchor — the schedule fires at
+// a daily UTC moment, so date doesn't matter beyond resolving the offset.
+// Handles non-integer-hour tz (e.g. India UTC+5:30) correctly because
+// it goes through ``Date`` rather than subtracting ``offset`` by hand.
+function localHmToUtc(hour: number, minute: number): { hour: number; minute: number } {
+  const d = new Date();
+  d.setHours(hour, minute, 0, 0);
+  return { hour: d.getUTCHours(), minute: d.getUTCMinutes() };
 }
+
+function utcHmToLocal(hour: number, minute: number): { hour: number; minute: number } {
+  const d = new Date();
+  d.setUTCHours(hour, minute, 0, 0);
+  return { hour: d.getHours(), minute: d.getMinutes() };
+}
+
+// What the form's local HH:MM is in UTC — surfaced under the form so
+// the operator can verify the canonical value before saving.
+const utcStartHour = computed(
+  () => localHmToUtc(draft.start_hour, draft.start_minute).hour
+);
+const utcStartMinute = computed(
+  () => localHmToUtc(draft.start_hour, draft.start_minute).minute
+);
 
 function errorMessage(e: unknown): string {
   if (typeof e === "object" && e !== null && "data" in e) {
@@ -361,10 +368,7 @@ async function loadFullSp500() {
 
 async function refresh() {
   try {
-    const resp = await api.getSchedule();
-    schedule.value = resp;
-    serverEpochMs.value = new Date(resp.server_time.now).getTime();
-    lastSync.value = Date.now();
+    schedule.value = await api.getSchedule();
   } catch {
     /* ignore transient errors */
   }
@@ -373,8 +377,11 @@ async function refresh() {
 function hydrateDraft() {
   const cfg = schedule.value?.config;
   if (!cfg) return;
-  draft.start_hour = cfg.start_hour;
-  draft.start_minute = cfg.start_minute;
+  // Backend stores UTC; the form shows operator-local. Convert here so
+  // the user can read/edit familiar wall-clock values.
+  const local = utcHmToLocal(cfg.start_hour, cfg.start_minute);
+  draft.start_hour = local.hour;
+  draft.start_minute = local.minute;
   draft.interval_hours = cfg.interval_hours;
   draft.workers = cfg.workers;
   tickersInput.value = cfg.tickers.join(", ");
@@ -385,16 +392,19 @@ async function persist(enabled: boolean) {
   message.value = "";
   error.value = "";
   try {
+    // Operator-local → UTC for the wire. Backend treats start_hour /
+    // start_minute as UTC integers.
+    const utcHm = localHmToUtc(draft.start_hour, draft.start_minute);
     const payload: ScheduleConfig = {
       ...draft,
+      start_hour: utcHm.hour,
+      start_minute: utcHm.minute,
       enabled,
       tickers: parseTickers(tickersInput.value),
     };
     schedule.value = await api.putSchedule(payload);
-    serverEpochMs.value = new Date(schedule.value.server_time.now).getTime();
-    lastSync.value = Date.now();
     message.value = enabled
-      ? `Activated. Next fire: ${schedule.value.next_run ? formatIso(schedule.value.next_run) : "?"}`
+      ? `Activated. Next fire: ${schedule.value.next_run ? formatLocal(schedule.value.next_run) : "?"}`
       : "Paused. Settings retained.";
   } catch (e) {
     error.value = errorMessage(e);
@@ -427,8 +437,6 @@ async function clearPending() {
       tickers: cfg.tickers,
       clear_pending: true,
     });
-    serverEpochMs.value = new Date(schedule.value.server_time.now).getTime();
-    lastSync.value = Date.now();
     message.value = "Pending catch-up cleared.";
   } catch (e) {
     error.value = errorMessage(e);

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.tasks import (
@@ -125,11 +125,11 @@ def test_scan_runner_processes_computes_started_at_iso():
     fake = _fake_ps_output([
         ("100", "01:00", "S", "/usr/bin/python -m app.runner NVDA"),
     ])
-    fixed_now = datetime(2026, 5, 20, 12, 0, 0)
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
     with patch("app.tasks._run_ps_scan", return_value=fake), \
-         patch("app.tasks._utc_now_naive", return_value=fixed_now):
+         patch("app.tasks._utc_now", return_value=fixed_now):
         rows = _scan_runner_processes()
-    assert rows[0]["started_at"] == "2026-05-20T11:59:00"
+    assert rows[0]["started_at"] == "2026-05-20T11:59:00+00:00"
 
 
 def test_scan_runner_processes_returns_empty_on_ps_failure():
@@ -150,9 +150,9 @@ def test_scan_runner_processes_isolates_overflowing_row():
         ("100", "00:05", "S", "/usr/bin/python -m app.runner -j 8 NVDA"),
         ("999", "999999998-00:00:00", "S", "/usr/bin/python -m app.runner MSFT"),
     ])
-    fixed_now = datetime(2026, 5, 26, 12, 0, 0)
+    fixed_now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc)
     with patch("app.tasks._run_ps_scan", return_value=fake), \
-         patch("app.tasks._utc_now_naive", return_value=fixed_now):
+         patch("app.tasks._utc_now", return_value=fixed_now):
         rows = _scan_runner_processes()
     pids = [r["pid"] for r in rows]
     assert 100 in pids
@@ -241,8 +241,8 @@ def test_check_recent_launch_raises_when_inside_window():
         "tickers": [], "workers": 1, "log_path": None,
         "mode": None, "deep_model": None,
     }]
-    fixed_now = datetime(2026, 5, 20, 12, 0, 0)  # 5s after launch
-    with patch("app.tasks._utc_now_naive", return_value=fixed_now):
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)  # 5s after launch
+    with patch("app.tasks._utc_now", return_value=fixed_now):
         with pytest.raises(RecentDuplicateLaunch) as exc:
             _check_recent_launch(active, window_seconds=15)
     assert 4.5 < exc.value.gap_seconds < 5.5
@@ -254,14 +254,14 @@ def test_check_recent_launch_allows_when_outside_window():
         "tickers": [], "workers": 1, "log_path": None,
         "mode": None, "deep_model": None,
     }]
-    fixed_now = datetime(2026, 5, 20, 12, 0, 0)  # 1 hour after
-    with patch("app.tasks._utc_now_naive", return_value=fixed_now):
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)  # 1 hour after
+    with patch("app.tasks._utc_now", return_value=fixed_now):
         _check_recent_launch(active, window_seconds=15)  # no raise
 
 
 def test_check_recent_launch_no_active_no_raise():
-    fixed_now = datetime(2026, 5, 20, 12, 0, 0)
-    with patch("app.tasks._utc_now_naive", return_value=fixed_now):
+    fixed_now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    with patch("app.tasks._utc_now", return_value=fixed_now):
         _check_recent_launch([], window_seconds=15)
 
 
@@ -293,11 +293,16 @@ def test_api_returns_409_on_recent_duplicate(monkeypatch):
     from app import tasks as tasks_mod
     from app import api as api_mod
 
-    # Every /api/ route now sits behind the bearer-token dependency.
-    # Override it so this test can exercise the run-launch logic without
-    # minting a token; monkeypatch.setitem restores it afterwards.
+    # Every /api/ route sits behind the bearer-token dependency, and
+    # POST /api/runs additionally gates on the super-admin role since
+    # commit 6287a67. Override both so this test can exercise the
+    # run-launch logic without minting a token; monkeypatch.setitem
+    # restores each entry afterwards.
     monkeypatch.setitem(
         app.dependency_overrides, auth_mod.require_authenticated, lambda: None
+    )
+    monkeypatch.setitem(
+        app.dependency_overrides, auth_mod.require_admin, lambda: None
     )
 
     monkeypatch.setattr(

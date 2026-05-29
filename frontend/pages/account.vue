@@ -162,8 +162,9 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+const { formatLocal } = useFormatTime();
 function formatTs(iso: string): string {
-  return iso.replace("T", " ").slice(0, 19);
+  return formatLocal(iso);
 }
 
 async function loadUsers() {

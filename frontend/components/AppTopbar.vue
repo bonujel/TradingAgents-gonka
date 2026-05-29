@@ -45,6 +45,13 @@
           <span class="font-mono">{{ info.max_workers ?? "?" }}</span>
         </div>
       </template>
+      <div
+        class="flex items-center gap-2 rounded-lg border border-gonka-border bg-gonka-surface px-3 py-1.5 text-xs"
+        :title="`Browser timezone. All times in the UI are rendered in this zone.`"
+      >
+        <span class="font-mono text-gonka-muted">tz</span>
+        <span class="font-mono">{{ tzLabel }}</span>
+      </div>
     </div>
   </header>
 </template>
@@ -55,6 +62,20 @@ defineEmits(["toggle"]);
 const route = useRoute();
 const infoStore = useInfoStore();
 const info = computed(() => infoStore.info);
+
+// Operator's browser tz. Computed once at mount — changing the OS tz
+// mid-session is rare and we'd rather not re-poll every second. Format
+// example: ``Asia/Shanghai · UTC+08:00``.
+const tzLabel = computed(() => {
+  if (typeof Intl === "undefined") return "local";
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  const offsetMin = -new Date().getTimezoneOffset();
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `${tz} · UTC${sign}${hh}:${mm}`;
+});
 
 const pageTitle = computed(() => {
   if (route.path === "/") return "Decisions";

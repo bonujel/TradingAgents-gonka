@@ -16,6 +16,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Iterable, Iterator, Optional
 
 from tradingagents.agents.utils.rating import parse_rating
@@ -342,7 +343,12 @@ def run_daily(
     if not tickers:
         return {"trade_date": trade_date, "tickers": [], "success": 0, "failure": 0}
 
-    trade_date = trade_date or datetime.utcnow().strftime("%Y-%m-%d")
+    # Default trade_date = today in US Eastern. The S&P 500 universe trades
+    # on the NYSE / Nasdaq trading calendar, so a "today" run is always
+    # against the ET market day even when the runner box (or operator) lives
+    # in a different tz. Picking by the server's UTC date rolls over the
+    # market day prematurely for any operator west of London.
+    trade_date = trade_date or datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     run_id = db.start_run(run_date=trade_date, tickers=tickers)
 
     if max_workers is None:
